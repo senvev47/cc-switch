@@ -34,7 +34,22 @@ jobs:
         run: pnpm typecheck
 
       - name: Build Windows bundle
-        run: pnpm tauri build --bundles msi
+        shell: pwsh
+        run: |
+          pnpm tauri build --bundles msi
+          $buildExitCode = $LASTEXITCODE
+
+          if (-not (Test-Path "src-tauri/target/release/cc-switch.exe")) {
+            exit $buildExitCode
+          }
+
+          if (-not (Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue)) {
+            exit $buildExitCode
+          }
+
+          if ($buildExitCode -ne 0) {
+            Write-Warning "Tauri returned exit code $buildExitCode after producing the Windows artifacts. Continuing so the unsigned build can be downloaded."
+          }
 
       - name: Upload bundle
         uses: actions/upload-artifact@v5
