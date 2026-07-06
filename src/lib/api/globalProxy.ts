@@ -42,6 +42,7 @@ export interface ProxyWatchdogConfig {
 export interface ProxyWatchdogStatus {
   config: ProxyWatchdogConfig;
   effectiveProxyUrl: string | null;
+  isProxying: boolean;
   lastProbeSuccess: boolean | null;
   lastCheckedAt: string | null;
   lastError: string | null;

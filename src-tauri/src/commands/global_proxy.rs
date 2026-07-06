@@ -65,6 +65,7 @@ pub struct ProxyWatchdogConfig {
 pub struct ProxyWatchdogStatus {
     pub config: ProxyWatchdogConfig,
     pub effective_proxy_url: Option<String>,
+    pub is_proxying: bool,
     pub last_probe_success: Option<bool>,
     pub last_checked_at: Option<String>,
     pub last_error: Option<String>,
@@ -111,9 +112,12 @@ fn update_runtime(success: Option<bool>, error: Option<String>) {
 fn make_watchdog_status(db: &Database) -> Result<ProxyWatchdogStatus, AppError> {
     let config = read_watchdog_config(db)?;
     let runtime = runtime_snapshot();
+    let effective_proxy_url = db.get_global_proxy_url()?;
+    let is_proxying = effective_proxy_url.is_some();
     Ok(ProxyWatchdogStatus {
         config,
-        effective_proxy_url: db.get_global_proxy_url()?,
+        effective_proxy_url,
+        is_proxying,
         last_probe_success: runtime.last_probe_success,
         last_checked_at: runtime.last_checked_at,
         last_error: runtime.last_error,
@@ -382,6 +386,9 @@ pub async fn refresh_proxy_watchdog(
     state: tauri::State<'_, AppState>,
 ) -> Result<ProxyWatchdogStatus, String> {
     let config = read_watchdog_config(&state.db).map_err(|e| e.to_string())?;
+    if config.mode != ProxyWatchdogMode::Auto {
+        return make_watchdog_status(&state.db).map_err(|e| e.to_string());
+    }
     apply_watchdog_config(state.db.clone(), config).await?;
     make_watchdog_status(&state.db).map_err(|e| e.to_string())
 }

@@ -191,6 +191,10 @@ export function GlobalProxySettings() {
   const effectiveText =
     watchdogStatus?.effectiveProxyUrl ||
     t("settings.globalProxy.direct", { defaultValue: "直连" });
+  const routeText = watchdogStatus?.isProxying
+    ? t("settings.globalProxy.proxying", { defaultValue: "代理中" })
+    : t("settings.globalProxy.directing", { defaultValue: "直连中" });
+  const canRefreshWatchdog = mode === "auto";
 
   return (
     <div className="space-y-3">
@@ -214,10 +218,12 @@ export function GlobalProxySettings() {
           type="button"
           variant="outline"
           size="icon"
-          disabled={refreshMutation.isPending}
+          disabled={!canRefreshWatchdog || refreshMutation.isPending}
           onClick={() => refreshMutation.mutate()}
           title={t("settings.globalProxy.watchdogRefresh", {
-            defaultValue: "立即检测",
+            defaultValue: canRefreshWatchdog
+              ? "立即检测"
+              : "仅自动模式可检测",
           })}
         >
           {refreshMutation.isPending ? (
@@ -231,7 +237,9 @@ export function GlobalProxySettings() {
       {watchdogStatus && (
         <p className="text-xs text-muted-foreground">
           {t("settings.globalProxy.watchdogStatus", {
-            defaultValue: "当前生效：{{effective}}；最近检测：{{probe}}",
+            defaultValue:
+              "当前状态：{{route}}；当前生效：{{effective}}；最近检测：{{probe}}",
+            route: routeText,
             effective: effectiveText,
             probe: probeText,
           })}
