@@ -20,6 +20,7 @@ pub mod session_usage_opencode;
 pub mod skill;
 pub mod speedtest;
 pub mod sql_helpers;
+pub mod model_test;
 pub mod stream_check;
 pub mod subscription;
 pub mod sync_protocol;

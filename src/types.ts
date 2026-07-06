@@ -119,6 +119,10 @@ export interface ProviderTestConfig {
   degradedThresholdMs?: number;
   // 最大重试次数
   maxRetries?: number;
+  // 真实模型测试使用的模型；留空时使用全局默认
+  testModel?: string;
+  // 真实模型测试使用的提示词；留空时使用全局默认
+  testPrompt?: string;
 }
 
 export type AuthBindingSource = "provider_config" | "managed_account";

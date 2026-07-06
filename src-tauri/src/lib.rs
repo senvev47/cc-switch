@@ -1395,6 +1395,7 @@ pub fn run() {
             commands::sync_session_usage,
             commands::get_usage_data_sources,
             // Stream health check
+            commands::model_test_provider,
             commands::stream_check_provider,
             commands::stream_check_all_providers,
             commands::get_stream_check_config,

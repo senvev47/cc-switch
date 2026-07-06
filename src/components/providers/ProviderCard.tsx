@@ -17,7 +17,9 @@ import CodexOauthQuotaFooter from "@/components/CodexOauthQuotaFooter";
 import { PROVIDER_TYPES, TEMPLATE_TYPES } from "@/config/constants";
 import { isHermesReadOnlyProvider } from "@/config/hermesProviderPresets";
 import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
+import { HealthStatusIndicator } from "@/components/providers/HealthStatusIndicator";
 import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBadge";
+import type { StreamCheckResult } from "@/lib/api/model-test";
 import {
   extractCodexBaseUrl,
   extractCodexExperimentalBearerToken,
@@ -54,6 +56,7 @@ interface ProviderCardProps {
   onOpenTerminal?: (provider: Provider) => void;
   isTesting?: boolean;
   isTestingModels?: boolean;
+  modelTestResult?: StreamCheckResult;
   isProxyRunning: boolean;
   isProxyTakeover?: boolean; // 代理接管模式（Live配置已被接管，切换为热切换）
   dragHandleProps?: DragHandleProps;
@@ -155,6 +158,7 @@ export function ProviderCard({
   onOpenTerminal,
   isTesting,
   isTestingModels,
+  modelTestResult,
   isProxyRunning,
   isProxyTakeover = false,
   dragHandleProps,
@@ -415,6 +419,13 @@ export function ProviderCard({
                 <ProviderHealthBadge
                   consecutiveFailures={health.consecutive_failures}
                   isHealthy={health.is_healthy}
+                />
+              )}
+
+              {modelTestResult && (
+                <HealthStatusIndicator
+                  status={modelTestResult.status}
+                  responseTimeMs={modelTestResult.responseTimeMs}
                 />
               )}
 

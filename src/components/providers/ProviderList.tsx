@@ -47,13 +47,9 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { isTextEditableTarget } from "@/utils/domUtils";
 import {
-  extractCodexBaseUrl,
-  extractCodexExperimentalBearerToken,
-} from "@/utils/providerConfigUtils";
-import {
-  fetchModelsForConfig,
-  showFetchModelsError,
-} from "@/lib/api/model-fetch";
+  modelTestProvider,
+  type StreamCheckResult,
+} from "@/lib/api/model-test";
 
 interface ProviderListProps {
   providers: Record<string, Provider>;
@@ -75,76 +71,6 @@ interface ProviderListProps {
   isProxyTakeover?: boolean; // 代理接管模式（Live配置已被接管）
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
   onSetAsDefault?: (provider: Provider) => void; // OpenClaw: set as default model
-}
-
-interface ProviderModelTestConfig {
-  baseUrl: string;
-  apiKey: string;
-}
-
-function firstString(...values: unknown[]): string {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
-  }
-  return "";
-}
-
-function getProviderModelTestConfig(
-  provider: Provider,
-  appId: AppId,
-): ProviderModelTestConfig {
-  const config = provider.settingsConfig ?? {};
-  const env = (config as Record<string, any>).env ?? {};
-
-  if (appId === "codex") {
-    const configText =
-      typeof (config as Record<string, any>).config === "string"
-        ? ((config as Record<string, any>).config as string)
-        : "";
-    return {
-      baseUrl: extractCodexBaseUrl(configText) ?? "",
-      apiKey: firstString(
-        (config as Record<string, any>).auth?.OPENAI_API_KEY,
-        env.CODEX_API_KEY,
-        extractCodexExperimentalBearerToken(configText),
-      ),
-    };
-  }
-
-  if (appId === "gemini") {
-    return {
-      baseUrl: firstString(env.GOOGLE_GEMINI_BASE_URL),
-      apiKey: firstString(env.GEMINI_API_KEY),
-    };
-  }
-
-  if (appId === "opencode") {
-    return {
-      baseUrl: firstString((config as Record<string, any>).options?.baseURL),
-      apiKey: firstString((config as Record<string, any>).options?.apiKey),
-    };
-  }
-
-  if (appId === "openclaw") {
-    return {
-      baseUrl: firstString((config as Record<string, any>).baseUrl),
-      apiKey: firstString((config as Record<string, any>).apiKey),
-    };
-  }
-
-  if (appId === "hermes") {
-    return {
-      baseUrl: firstString((config as Record<string, any>).base_url),
-      apiKey: firstString((config as Record<string, any>).api_key),
-    };
-  }
-
-  return {
-    baseUrl: firstString(env.ANTHROPIC_BASE_URL),
-    apiKey: firstString(env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_API_KEY),
-  };
 }
 
 export function ProviderList({
@@ -173,6 +99,9 @@ export function ProviderList({
   const [modelTestingProviderId, setModelTestingProviderId] = useState<
     string | null
   >(null);
+  const [modelTestResults, setModelTestResults] = useState<
+    Record<string, StreamCheckResult>
+  >({});
   const { sortedProviders, sensors, handleDragEnd } = useDragSort(
     providers,
     appId,
@@ -289,31 +218,67 @@ export function ProviderList({
 
   const handleTestModels = useCallback(
     async (provider: Provider) => {
-      const { baseUrl, apiKey } = getProviderModelTestConfig(provider, appId);
-      if (!baseUrl || !apiKey) {
-        showFetchModelsError(null, t, {
-          hasApiKey: !!apiKey,
-          hasBaseUrl: !!baseUrl,
-        });
-        return;
-      }
-
       setModelTestingProviderId(provider.id);
       try {
-        const models = await fetchModelsForConfig(baseUrl, apiKey);
-        if (models.length === 0) {
-          toast.info(t("providerForm.fetchModelsEmpty"));
-        } else {
+        const result = await modelTestProvider(appId, provider.id);
+        setModelTestResults((prev) => ({
+          ...prev,
+          [provider.id]: result,
+        }));
+
+        if (result.status === "operational") {
           toast.success(
-            t("providerForm.fetchModelsSuccess", { count: models.length }),
+            t("streamCheck.operational", {
+              providerName: provider.name,
+              responseTimeMs: result.responseTimeMs,
+              defaultValue: `${provider.name} 运行正常 (${result.responseTimeMs}ms)`,
+            }),
+            { closeButton: true },
+          );
+        } else if (result.status === "degraded") {
+          toast.warning(
+            t("streamCheck.degraded", {
+              providerName: provider.name,
+              responseTimeMs: result.responseTimeMs,
+              defaultValue: `${provider.name} 响应较慢 (${result.responseTimeMs}ms)`,
+            }),
+            { closeButton: true },
+          );
+        } else if (result.errorCategory === "modelNotFound") {
+          toast.error(
+            t("streamCheck.modelNotFound", {
+              providerName: provider.name,
+              model: result.modelUsed,
+              defaultValue: `${provider.name} 测试模型 ${result.modelUsed} 不存在或已下架`,
+            }),
+            {
+              description: t("streamCheck.modelNotFoundHint", {
+                defaultValue: "",
+              }),
+              duration: 10000,
+              closeButton: true,
+            },
+          );
+        } else {
+          toast.error(
+            t("streamCheck.failed", {
+              providerName: provider.name,
+              message: result.message,
+              defaultValue: `${provider.name} 检查失败: ${result.message}`,
+            }),
+            { duration: 8000, closeButton: true },
           );
         }
       } catch (error) {
-        console.warn("[ModelFetch] Failed:", error);
-        showFetchModelsError(error, t, {
-          hasApiKey: !!apiKey,
-          hasBaseUrl: !!baseUrl,
-        });
+        console.warn("[ModelTest] Failed:", error);
+        toast.error(
+          t("streamCheck.error", {
+            providerName: provider.name,
+            error: String(error),
+            defaultValue: `${provider.name} 检查出错: ${String(error)}`,
+          }),
+          { closeButton: true },
+        );
       } finally {
         setModelTestingProviderId((current) =>
           current === provider.id ? null : current,
@@ -535,6 +500,7 @@ export function ProviderList({
                 onTestModels={handleTestModels}
                 isTesting={isChecking(provider.id)}
                 isTestingModels={modelTestingProviderId === provider.id}
+                modelTestResult={modelTestResults[provider.id]}
                 isProxyRunning={isProxyRunning}
                 isProxyTakeover={isProxyTakeover}
                 isAutoFailoverEnabled={isFailoverModeActive}
@@ -676,6 +642,7 @@ interface SortableProviderCardProps {
   onTestModels?: (provider: Provider) => void;
   isTesting: boolean;
   isTestingModels: boolean;
+  modelTestResult?: StreamCheckResult;
   isProxyRunning: boolean;
   isProxyTakeover: boolean;
   isAutoFailoverEnabled: boolean;
@@ -709,6 +676,7 @@ function SortableProviderCard({
   onTestModels,
   isTesting,
   isTestingModels,
+  modelTestResult,
   isProxyRunning,
   isProxyTakeover,
   isAutoFailoverEnabled,
@@ -758,6 +726,7 @@ function SortableProviderCard({
         onTestModels={onTestModels}
         isTesting={isTesting}
         isTestingModels={isTestingModels}
+        modelTestResult={modelTestResult}
         isProxyRunning={isProxyRunning}
         isProxyTakeover={isProxyTakeover}
         dragHandleProps={{
