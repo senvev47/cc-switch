@@ -51,6 +51,8 @@ jobs:
             Write-Warning "Tauri returned exit code $buildExitCode after producing the Windows artifacts. Continuing so the unsigned build can be downloaded."
           }
 
+          exit 0
+
       - name: Upload bundle
         uses: actions/upload-artifact@v5
         with:
