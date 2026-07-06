@@ -14,13 +14,13 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-const DEFAULT_WATCHDOG_PROXY_URL: &str = "http://127.0.0.1:10811";
+const DEFAULT_WATCHDOG_PROXY_URL: &str = "http://127.0.0.1:7890";
 const WATCHDOG_INTERVAL_SECS: u64 = 30;
 const WATCHDOG_TEST_URLS: &[&str] = &[
-    "https://ai2.hhhl.cc/v1/models",
-    "https://vsllm.com/v1/models",
-    "https://gpt.api456.me/v1/models",
-    "https://ai.962831.xyz/v1/models",
+    "https://www.gstatic.com/generate_204",
+    "https://www.google.com/generate_204",
+    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://www.bing.com/",
 ];
 
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
