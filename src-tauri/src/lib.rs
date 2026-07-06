@@ -1050,6 +1050,7 @@ pub fn run() {
 
                 // 检查 settings 表中的代理状态，自动恢复代理服务
                 restore_proxy_state_on_startup(&state).await;
+                commands::start_proxy_watchdog(state.db.clone());
 
                 // Periodic backup check (on startup)
                 if let Err(e) = state.db.periodic_backup_if_needed() {
@@ -1447,6 +1448,10 @@ pub fn run() {
             // Global upstream proxy
             commands::get_global_proxy_url,
             commands::set_global_proxy_url,
+            commands::get_proxy_watchdog_config,
+            commands::set_proxy_watchdog_config,
+            commands::get_proxy_watchdog_status,
+            commands::refresh_proxy_watchdog,
             commands::test_proxy_url,
             commands::get_upstream_proxy_status,
             commands::scan_local_proxies,
