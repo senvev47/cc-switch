@@ -18,6 +18,8 @@ const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
 const GROUP_EXPANSION_STORAGE_KEY =
   "cc-switch.sessionManager.groupExpansionState";
+const PINNED_SESSIONS_STORAGE_KEY =
+  "cc-switch.sessionManager.pinnedSessions";
 
 vi.mock("sonner", () => ({
   toast: {
@@ -156,6 +158,7 @@ describe("SessionManagerPage", () => {
     Element.prototype.scrollIntoView = vi.fn();
     window.localStorage.removeItem("cc-switch.sessionManager.listViewMode");
     window.localStorage.removeItem(GROUP_EXPANSION_STORAGE_KEY);
+    window.localStorage.removeItem(PINNED_SESSIONS_STORAGE_KEY);
 
     const sessions: SessionMeta[] = [
       {
@@ -679,5 +682,44 @@ describe("SessionManagerPage", () => {
     ).toBeInTheDocument();
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
+  });
+
+  it("persists a pinned session and excludes it from the default cleanup scan", async () => {
+    renderPage();
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Alpha Session" }),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getAllByTitle("置顶会话")[0]);
+
+    await waitFor(() =>
+      expect(
+        JSON.parse(
+          window.localStorage.getItem(PINNED_SESSIONS_STORAGE_KEY)!,
+        ),
+      ).toHaveLength(1),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "扫描可清理会话" }),
+    );
+
+    const cleanupDialog = await screen.findByTestId("confirm-dialog");
+    expect(cleanupDialog).toHaveTextContent("2");
+    expect(cleanupDialog).toHaveTextContent("已跳过");
+
+    fireEvent.click(
+      within(cleanupDialog).getByRole("button", { name: "继续清理" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("confirm-dialog")).toHaveTextContent(
+        "批量删除会话",
+      ),
+    );
+    expect(screen.getByText("Alpha Session")).toBeInTheDocument();
   });
 });

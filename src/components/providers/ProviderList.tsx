@@ -1,19 +1,33 @@
 import { CSS } from "@dnd-kit/utilities";
-import { DndContext, closestCenter } from "@dnd-kit/core";
+import { DndContext, closestCenter, type DragEndEvent } from "@dnd-kit/core";
 import {
+  arrayMove,
   SortableContext,
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, Search, X } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckSquare,
+  Folder,
+  FolderPlus,
+  GripVertical,
+  MoreHorizontal,
+  Search,
+  Trash2,
+  Ungroup,
+  X,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -42,9 +56,18 @@ import {
   useCurrentOmoProviderId,
   useCurrentOmoSlimProviderId,
 } from "@/lib/query/omo";
-import { useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { isTextEditableTarget } from "@/utils/domUtils";
 import {
   modelTestProvider,
@@ -73,6 +96,37 @@ interface ProviderListProps {
   onSetAsDefault?: (provider: Provider) => void; // OpenClaw: set as default model
 }
 
+interface ProviderGroupView {
+  id: string;
+  name: string;
+  sortIndex: number;
+  providers: Provider[];
+}
+
+const PROVIDER_GROUP_DND_PREFIX = "provider-group:";
+
+const getProviderGroup = (provider: Provider) => {
+  const groupId = provider.meta?.providerGroupId?.trim();
+  const groupName = provider.meta?.providerGroupName?.trim();
+  if (!groupId || !groupName) return null;
+
+  return {
+    id: groupId,
+    name: groupName,
+    sortIndex: provider.meta?.providerGroupSortIndex ?? Number.MAX_SAFE_INTEGER,
+  };
+};
+
+const createProviderGroupId = (name: string) => {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 36);
+  return `group-${slug || "custom"}-${Date.now().toString(36)}`;
+};
+
 export function ProviderList({
   providers,
   currentProviderId,
@@ -95,6 +149,7 @@ export function ProviderList({
   onSetAsDefault,
 }: ProviderListProps) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const { checkProvider, isChecking } = useStreamCheck(appId);
   const [modelTestingProviderId, setModelTestingProviderId] = useState<
     string | null
@@ -106,6 +161,13 @@ export function ProviderList({
     providers,
     appId,
   );
+  const [isGroupManageMode, setIsGroupManageMode] = useState(false);
+  const [selectedProviderIds, setSelectedProviderIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [expandedProviderGroupIds, setExpandedProviderGroupIds] = useState<
+    Set<string>
+  >(() => new Set());
 
   const { data: opencodeLiveIds } = useQuery({
     queryKey: ["opencodeLiveProviderIds"],
@@ -289,7 +351,6 @@ export function ProviderList({
   );
 
   // Import current live config as default provider
-  const queryClient = useQueryClient();
   const importMutation = useMutation({
     mutationFn: async (): Promise<boolean> => {
       if (appId === "opencode") {
@@ -369,6 +430,365 @@ export function ProviderList({
       );
     });
   }, [searchTerm, sortedProviders]);
+
+  const providerGroups = useMemo(() => {
+    const groupMap = new Map<string, ProviderGroupView>();
+
+    sortedProviders.forEach((provider) => {
+      const group = getProviderGroup(provider);
+      if (!group) return;
+
+      const existing = groupMap.get(group.id);
+      if (existing) {
+        existing.providers.push(provider);
+        existing.sortIndex = Math.min(existing.sortIndex, group.sortIndex);
+        if (!existing.name && group.name) {
+          existing.name = group.name;
+        }
+      } else {
+        groupMap.set(group.id, {
+          id: group.id,
+          name: group.name,
+          sortIndex: group.sortIndex,
+          providers: [provider],
+        });
+      }
+    });
+
+    return Array.from(groupMap.values()).sort((a, b) => {
+      if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
+      return a.name.localeCompare(b.name);
+    });
+  }, [sortedProviders]);
+
+  const filteredProviderGroups = useMemo(() => {
+    const groupMap = new Map(providerGroups.map((group) => [group.id, group]));
+    const visibleGroups = new Map<string, ProviderGroupView>();
+    const ungrouped: Provider[] = [];
+
+    filteredProviders.forEach((provider) => {
+      const group = getProviderGroup(provider);
+      if (!group) {
+        ungrouped.push(provider);
+        return;
+      }
+
+      const sourceGroup = groupMap.get(group.id);
+      if (!sourceGroup) {
+        ungrouped.push(provider);
+        return;
+      }
+
+      const existing = visibleGroups.get(group.id);
+      if (existing) {
+        existing.providers.push(provider);
+      } else {
+        visibleGroups.set(group.id, {
+          id: sourceGroup.id,
+          name: sourceGroup.name,
+          sortIndex: sourceGroup.sortIndex,
+          providers: [provider],
+        });
+      }
+    });
+
+    return {
+      groups: Array.from(visibleGroups.values()).sort((a, b) => {
+        if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
+        return a.name.localeCompare(b.name);
+      }),
+      ungrouped,
+    };
+  }, [filteredProviders, providerGroups]);
+
+  useEffect(() => {
+    setSelectedProviderIds((current) => {
+      const validIds = new Set(sortedProviders.map((provider) => provider.id));
+      let changed = false;
+      const next = new Set<string>();
+      current.forEach((providerId) => {
+        if (validIds.has(providerId)) {
+          next.add(providerId);
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+  }, [sortedProviders]);
+
+  useEffect(() => {
+    setExpandedProviderGroupIds((current) => {
+      const knownGroupIds = new Set(providerGroups.map((group) => group.id));
+      const next = new Set<string>();
+      let changed = false;
+
+      current.forEach((groupId) => {
+        if (knownGroupIds.has(groupId)) {
+          next.add(groupId);
+        } else {
+          changed = true;
+        }
+      });
+
+      providerGroups.forEach((group) => {
+        if (!current.has(group.id)) {
+          next.add(group.id);
+          changed = true;
+        }
+      });
+
+      return changed ? next : current;
+    });
+  }, [providerGroups]);
+
+  const selectedProviders = useMemo(
+    () =>
+      sortedProviders.filter((provider) => selectedProviderIds.has(provider.id)),
+    [selectedProviderIds, sortedProviders],
+  );
+
+  const refreshProviderViews = useCallback(async () => {
+    await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
+    await queryClient.invalidateQueries({ queryKey: ["failoverQueue", appId] });
+    try {
+      await providersApi.updateTrayMenu();
+    } catch (error) {
+      console.error("Failed to update tray menu after provider grouping", error);
+    }
+  }, [appId, queryClient]);
+
+  const updateProviderGroupMeta = useCallback(
+    async (
+      targets: Provider[],
+      group: { id: string; name: string; sortIndex?: number } | null,
+    ) => {
+      if (targets.length === 0) return;
+
+      const updates = targets.map((provider) => {
+        const meta = { ...(provider.meta ?? {}) };
+
+        if (group) {
+          meta.providerGroupId = group.id;
+          meta.providerGroupName = group.name;
+          meta.providerGroupSortIndex = group.sortIndex;
+        } else {
+          delete meta.providerGroupId;
+          delete meta.providerGroupName;
+          delete meta.providerGroupSortIndex;
+        }
+
+        return { ...provider, meta };
+      });
+
+      try {
+        await Promise.all(
+          updates.map((provider) => providersApi.update(provider, appId)),
+        );
+        await refreshProviderViews();
+        toast.success(
+          group
+            ? t("provider.groupAssignSuccess", {
+                defaultValue: "已加入分组",
+              })
+            : t("provider.groupClearSuccess", {
+                defaultValue: "已取消分组",
+              }),
+          { closeButton: true },
+        );
+      } catch (error) {
+        console.error("Failed to update provider group", error);
+        toast.error(
+          t("provider.groupUpdateFailed", {
+            defaultValue: "分组更新失败",
+          }),
+        );
+      }
+    },
+    [appId, refreshProviderViews, t],
+  );
+
+  const promptForGroupName = useCallback(() => {
+    const name = window.prompt(
+      t("provider.groupNamePrompt", {
+        defaultValue: "请输入分组名称",
+      }),
+    );
+    const trimmed = name?.trim();
+    return trimmed || null;
+  }, [t]);
+
+  const createGroupForProviders = useCallback(
+    async (targets: Provider[]) => {
+      const name = promptForGroupName();
+      if (!name) return;
+      await updateProviderGroupMeta(targets, {
+        id: createProviderGroupId(name),
+        name,
+        sortIndex: providerGroups.length,
+      });
+    },
+    [promptForGroupName, providerGroups.length, updateProviderGroupMeta],
+  );
+
+  const assignProvidersToExistingGroup = useCallback(
+    async (targets: Provider[], group: ProviderGroupView) => {
+      await updateProviderGroupMeta(targets, {
+        id: group.id,
+        name: group.name,
+        sortIndex: group.sortIndex,
+      });
+    },
+    [updateProviderGroupMeta],
+  );
+
+  const clearProvidersGroup = useCallback(
+    async (targets: Provider[]) => {
+      await updateProviderGroupMeta(targets, null);
+    },
+    [updateProviderGroupMeta],
+  );
+
+  const deleteProviderGroup = useCallback(
+    async (group: ProviderGroupView) => {
+      const confirmed = window.confirm(
+        t("provider.groupDeleteConfirm", {
+          defaultValue:
+            "将删除分组“{{name}}”中的 {{count}} 个供应商。此操作不可恢复，确认继续？",
+          name: group.name,
+          count: group.providers.length,
+        }),
+      );
+      if (!confirmed) return;
+
+      try {
+        const results = await Promise.allSettled(
+          group.providers.map((provider) =>
+            providersApi.delete(provider.id, appId),
+          ),
+        );
+        const failed = results.filter((result) => result.status === "rejected");
+        await refreshProviderViews();
+
+        if (failed.length === 0) {
+          toast.success(
+            t("provider.groupDeleteSuccess", {
+              defaultValue: "已删除分组内供应商",
+            }),
+            { closeButton: true },
+          );
+        } else {
+          toast.error(
+            t("provider.groupDeletePartialFailed", {
+              defaultValue: "{{failed}} 个供应商删除失败",
+              failed: failed.length,
+            }),
+          );
+        }
+      } catch (error) {
+        console.error("Failed to delete provider group", error);
+        toast.error(
+          t("provider.groupDeleteFailed", {
+            defaultValue: "分组删除失败",
+          }),
+        );
+      }
+    },
+    [appId, refreshProviderViews, t],
+  );
+
+  const reorderProviderGroups = useCallback(
+    async (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+
+      const activeId = String(active.id);
+      const overId = String(over.id);
+      if (
+        !activeId.startsWith(PROVIDER_GROUP_DND_PREFIX) ||
+        !overId.startsWith(PROVIDER_GROUP_DND_PREFIX)
+      ) {
+        handleDragEnd(event);
+        return;
+      }
+
+      const oldIndex = providerGroups.findIndex(
+        (group) => `${PROVIDER_GROUP_DND_PREFIX}${group.id}` === activeId,
+      );
+      const newIndex = providerGroups.findIndex(
+        (group) => `${PROVIDER_GROUP_DND_PREFIX}${group.id}` === overId,
+      );
+      if (oldIndex === -1 || newIndex === -1) return;
+
+      const reordered = arrayMove(providerGroups, oldIndex, newIndex);
+      try {
+        await Promise.all(
+          reordered.flatMap((group, index) =>
+            group.providers.map((provider) =>
+              providersApi.update(
+                {
+                  ...provider,
+                  meta: {
+                    ...(provider.meta ?? {}),
+                    providerGroupId: group.id,
+                    providerGroupName: group.name,
+                    providerGroupSortIndex: index,
+                  },
+                },
+                appId,
+              ),
+            ),
+          ),
+        );
+        await refreshProviderViews();
+        toast.success(
+          t("provider.groupSortUpdated", {
+            defaultValue: "分组排序已更新",
+          }),
+          { closeButton: true },
+        );
+      } catch (error) {
+        console.error("Failed to reorder provider groups", error);
+        toast.error(
+          t("provider.groupSortUpdateFailed", {
+            defaultValue: "分组排序更新失败",
+          }),
+        );
+      }
+    },
+    [appId, handleDragEnd, providerGroups, refreshProviderViews, t],
+  );
+
+  const toggleProviderSelected = useCallback(
+    (providerId: string, checked: boolean) => {
+      setSelectedProviderIds((current) => {
+        const next = new Set(current);
+        if (checked) {
+          next.add(providerId);
+        } else {
+          next.delete(providerId);
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const allFilteredProvidersSelected =
+    filteredProviders.length > 0 &&
+    filteredProviders.every((provider) => selectedProviderIds.has(provider.id));
+
+  const toggleAllFilteredProviders = useCallback(() => {
+    setSelectedProviderIds((current) => {
+      const next = new Set(current);
+      if (allFilteredProvidersSelected) {
+        filteredProviders.forEach((provider) => next.delete(provider.id));
+      } else {
+        filteredProviders.forEach((provider) => next.add(provider.id));
+      }
+      return next;
+    });
+  }, [allFilteredProvidersSelected, filteredProviders]);
 
   const claudeDesktopStatusMessages = useMemo(() => {
     if (appId !== "claude-desktop" || !claudeDesktopStatus) return [];
@@ -450,82 +870,181 @@ export function ProviderList({
     );
   }
 
-  const renderProviderList = () => (
-    <DndContext
-      sensors={sensors}
-      collisionDetection={closestCenter}
-      onDragEnd={handleDragEnd}
-    >
-      <SortableContext
-        items={filteredProviders.map((provider) => provider.id)}
-        strategy={verticalListSortingStrategy}
-      >
-        <div className="space-y-3">
-          {filteredProviders.map((provider) => {
-            const isOmo = provider.category === "omo";
-            const isOmoSlim = provider.category === "omo-slim";
-            const isOmoCurrent = isOmo && provider.id === (currentOmoId || "");
-            const isOmoSlimCurrent =
-              isOmoSlim && provider.id === (currentOmoSlimId || "");
-            const isHermesCurrent =
-              appId === "hermes" && hermesCurrentProviderId === provider.id;
-            return (
-              <SortableProviderCard
-                key={provider.id}
-                provider={provider}
-                isCurrent={
-                  isOmo
-                    ? isOmoCurrent
-                    : isOmoSlim
-                      ? isOmoSlimCurrent
-                      : appId === "hermes"
-                        ? isHermesCurrent
-                        : provider.id === currentProviderId
-                }
-                appId={appId}
-                isInConfig={isProviderInConfig(provider.id)}
-                isOmo={isOmo}
-                isOmoSlim={isOmoSlim}
-                onSwitch={onSwitch}
-                onEdit={onEdit}
-                onDelete={onDelete}
-                onRemoveFromConfig={onRemoveFromConfig}
-                onDisableOmo={onDisableOmo}
-                onDisableOmoSlim={onDisableOmoSlim}
-                onDuplicate={onDuplicate}
-                onConfigureUsage={onConfigureUsage}
-                onOpenWebsite={onOpenWebsite}
-                onOpenTerminal={onOpenTerminal}
-                onTest={handleTest}
-                onTestModels={handleTestModels}
-                isTesting={isChecking(provider.id)}
-                isTestingModels={modelTestingProviderId === provider.id}
-                modelTestResult={modelTestResults[provider.id]}
-                isProxyRunning={isProxyRunning}
-                isProxyTakeover={isProxyTakeover}
-                isAutoFailoverEnabled={isFailoverModeActive}
-                failoverPriority={getFailoverPriority(provider.id)}
-                isInFailoverQueue={isInFailoverQueue(provider.id)}
-                onToggleFailover={(enabled) =>
-                  handleToggleFailover(provider.id, enabled)
-                }
-                activeProviderId={activeProviderId}
-                // OpenClaw: default model / Hermes: model.provider === provider.id
-                isDefaultModel={
-                  appId === "hermes"
-                    ? isHermesCurrent
-                    : isProviderDefaultModel(provider.id)
-                }
-                onSetAsDefault={
-                  onSetAsDefault ? () => onSetAsDefault(provider) : undefined
-                }
-              />
-            );
-          })}
-        </div>
-      </SortableContext>
-    </DndContext>
+  const renderProviderGroupMenu = (targets: Provider[]) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="secondary"
+          size="sm"
+          className="h-7 gap-1.5 px-2.5 text-xs"
+          disabled={targets.length === 0}
+        >
+          <FolderPlus className="h-3.5 w-3.5" />
+          {t("provider.joinGroup", { defaultValue: "加入分组" })}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-52">
+        <DropdownMenuLabel>
+          {t("provider.groupAction", { defaultValue: "分组操作" })}
+        </DropdownMenuLabel>
+        <DropdownMenuItem onClick={() => void createGroupForProviders(targets)}>
+          <FolderPlus className="mr-2 h-4 w-4" />
+          {t("provider.createNewGroup", { defaultValue: "新建分组" })}
+        </DropdownMenuItem>
+        {providerGroups.length > 0 && <DropdownMenuSeparator />}
+        {providerGroups.map((group) => (
+          <DropdownMenuItem
+            key={group.id}
+            onClick={() => void assignProvidersToExistingGroup(targets, group)}
+          >
+            <Folder className="mr-2 h-4 w-4" />
+            <span className="truncate">{group.name}</span>
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={() => void clearProvidersGroup(targets)}>
+          <Ungroup className="mr-2 h-4 w-4" />
+          {t("provider.clearGroup", { defaultValue: "取消分组" })}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
+
+  const renderProviderCard = (provider: Provider) => {
+    const isOmo = provider.category === "omo";
+    const isOmoSlim = provider.category === "omo-slim";
+    const isOmoCurrent = isOmo && provider.id === (currentOmoId || "");
+    const isOmoSlimCurrent =
+      isOmoSlim && provider.id === (currentOmoSlimId || "");
+    const isHermesCurrent =
+      appId === "hermes" && hermesCurrentProviderId === provider.id;
+
+    return (
+      <SortableProviderCard
+        key={provider.id}
+        provider={provider}
+        isCurrent={
+          isOmo
+            ? isOmoCurrent
+            : isOmoSlim
+              ? isOmoSlimCurrent
+              : appId === "hermes"
+                ? isHermesCurrent
+                : provider.id === currentProviderId
+        }
+        appId={appId}
+        isInConfig={isProviderInConfig(provider.id)}
+        isOmo={isOmo}
+        isOmoSlim={isOmoSlim}
+        onSwitch={onSwitch}
+        onEdit={onEdit}
+        onDelete={onDelete}
+        onRemoveFromConfig={onRemoveFromConfig}
+        onDisableOmo={onDisableOmo}
+        onDisableOmoSlim={onDisableOmoSlim}
+        onDuplicate={onDuplicate}
+        onConfigureUsage={onConfigureUsage}
+        onOpenWebsite={onOpenWebsite}
+        onOpenTerminal={onOpenTerminal}
+        onTest={handleTest}
+        onTestModels={handleTestModels}
+        isTesting={isChecking(provider.id)}
+        isTestingModels={modelTestingProviderId === provider.id}
+        modelTestResult={modelTestResults[provider.id]}
+        isProxyRunning={isProxyRunning}
+        isProxyTakeover={isProxyTakeover}
+        isAutoFailoverEnabled={isFailoverModeActive}
+        failoverPriority={getFailoverPriority(provider.id)}
+        isInFailoverQueue={isInFailoverQueue(provider.id)}
+        onToggleFailover={(enabled) => handleToggleFailover(provider.id, enabled)}
+        activeProviderId={activeProviderId}
+        isDefaultModel={
+          appId === "hermes"
+            ? isHermesCurrent
+            : isProviderDefaultModel(provider.id)
+        }
+        onSetAsDefault={
+          onSetAsDefault ? () => onSetAsDefault(provider) : undefined
+        }
+        isGroupManageMode={isGroupManageMode}
+        isSelected={selectedProviderIds.has(provider.id)}
+        onToggleSelected={(checked) =>
+          toggleProviderSelected(provider.id, checked)
+        }
+        groupMenu={renderProviderGroupMenu([provider])}
+      />
+    );
+  };
+
+  const renderProviderList = () => {
+    const sortableItems = [
+      ...filteredProviderGroups.groups.map(
+        (group) => `${PROVIDER_GROUP_DND_PREFIX}${group.id}`,
+      ),
+      ...filteredProviders.map((provider) => provider.id),
+    ];
+
+    return (
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={reorderProviderGroups}
+      >
+        <SortableContext items={sortableItems} strategy={verticalListSortingStrategy}>
+          <div className="space-y-3">
+            {filteredProviderGroups.groups.map((group) => {
+              const fullGroup =
+                providerGroups.find((candidate) => candidate.id === group.id) ??
+                group;
+
+              return (
+                <SortableProviderGroup
+                  key={group.id}
+                  group={group}
+                  isExpanded={expandedProviderGroupIds.has(group.id)}
+                  onToggleExpanded={() => {
+                    setExpandedProviderGroupIds((current) => {
+                      const next = new Set(current);
+                      if (next.has(group.id)) {
+                        next.delete(group.id);
+                      } else {
+                        next.add(group.id);
+                      }
+                      return next;
+                    });
+                  }}
+                  onDeleteGroup={() => void deleteProviderGroup(fullGroup)}
+                  onClearGroup={() => void clearProvidersGroup(fullGroup.providers)}
+                >
+                  {group.providers.map((provider) =>
+                    renderProviderCard(provider),
+                  )}
+                </SortableProviderGroup>
+              );
+            })}
+
+            {filteredProviderGroups.ungrouped.length > 0 && (
+              <div className="space-y-3">
+                {filteredProviderGroups.groups.length > 0 && (
+                  <div className="flex items-center gap-2 px-1 text-xs font-medium text-muted-foreground">
+                    <span className="h-px flex-1 bg-border" />
+                    {t("provider.ungrouped", { defaultValue: "未分组" })}
+                    <Badge variant="outline" className="text-[10px]">
+                      {filteredProviderGroups.ungrouped.length}
+                    </Badge>
+                    <span className="h-px flex-1 bg-border" />
+                  </div>
+                )}
+                {filteredProviderGroups.ungrouped.map((provider) =>
+                  renderProviderCard(provider),
+                )}
+              </div>
+            )}
+          </div>
+        </SortableContext>
+      </DndContext>
+    );
+  };
 
   return (
     <div className="mt-4 space-y-4">
@@ -608,6 +1127,77 @@ export function ProviderList({
         )}
       </AnimatePresence>
 
+      <div className="rounded-lg border bg-muted/30 px-3 py-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2 text-sm">
+            <Folder className="h-4 w-4 text-muted-foreground" />
+            <span className="font-medium">
+              {t("provider.groupManage", { defaultValue: "供应商分组" })}
+            </span>
+            <Badge variant="secondary" className="text-xs">
+              {providerGroups.length}
+            </Badge>
+            {isGroupManageMode && (
+              <span className="text-xs text-muted-foreground">
+                {t("provider.groupSelectedCount", {
+                  defaultValue: "已选 {{count}} 个",
+                  count: selectedProviders.length,
+                })}
+              </span>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {isGroupManageMode && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2.5 text-xs"
+                  onClick={toggleAllFilteredProviders}
+                >
+                  {allFilteredProvidersSelected
+                    ? t("provider.clearFilteredSelection", {
+                        defaultValue: "取消全选",
+                      })
+                    : t("provider.selectAllFiltered", {
+                        defaultValue: "全选当前",
+                      })}
+                </Button>
+                {renderProviderGroupMenu(selectedProviders)}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1.5 px-2.5 text-xs"
+                  disabled={selectedProviders.length === 0}
+                  onClick={() => void clearProvidersGroup(selectedProviders)}
+                >
+                  <Ungroup className="h-3.5 w-3.5" />
+                  {t("provider.clearGroup", { defaultValue: "取消分组" })}
+                </Button>
+              </>
+            )}
+            <Button
+              variant={isGroupManageMode ? "secondary" : "outline"}
+              size="sm"
+              className="h-7 gap-1.5 px-2.5 text-xs"
+              onClick={() => {
+                if (isGroupManageMode) {
+                  setSelectedProviderIds(new Set());
+                }
+                setIsGroupManageMode((current) => !current);
+              }}
+            >
+              <CheckSquare className="h-3.5 w-3.5" />
+              {isGroupManageMode
+                ? t("provider.exitGroupManage", { defaultValue: "退出分组管理" })
+                : t("provider.enterGroupManage", {
+                    defaultValue: "分组管理",
+                  })}
+            </Button>
+          </div>
+        </div>
+      </div>
+
       {filteredProviders.length === 0 ? (
         <div className="px-6 py-8 text-sm text-center border border-dashed rounded-lg border-border text-muted-foreground">
           {t("provider.noSearchResults", {
@@ -653,6 +1243,128 @@ interface SortableProviderCardProps {
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
+  isGroupManageMode: boolean;
+  isSelected: boolean;
+  onToggleSelected: (checked: boolean) => void;
+  groupMenu: ReactNode;
+}
+
+interface SortableProviderGroupProps {
+  group: ProviderGroupView;
+  isExpanded: boolean;
+  onToggleExpanded: () => void;
+  onDeleteGroup: () => void;
+  onClearGroup: () => void;
+  children: ReactNode;
+}
+
+function SortableProviderGroup({
+  group,
+  isExpanded,
+  onToggleExpanded,
+  onDeleteGroup,
+  onClearGroup,
+  children,
+}: SortableProviderGroupProps) {
+  const { t } = useTranslation();
+  const {
+    setNodeRef,
+    attributes,
+    listeners,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: `${PROVIDER_GROUP_DND_PREFIX}${group.id}` });
+
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        "rounded-xl border bg-muted/20 p-3 transition-all",
+        isDragging && "z-10 scale-[1.01] border-primary shadow-lg",
+      )}
+    >
+      <div className="mb-3 flex items-center gap-2">
+        <button
+          type="button"
+          className={cn(
+            "-ml-1 flex-shrink-0 cursor-grab rounded-md p-1.5 text-muted-foreground/60 transition-colors hover:bg-muted hover:text-muted-foreground active:cursor-grabbing",
+            isDragging && "cursor-grabbing",
+          )}
+          aria-label={t("provider.groupDragHandle", {
+            defaultValue: "拖动供应商分组",
+          })}
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          onClick={onToggleExpanded}
+        >
+          <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate text-sm font-semibold">
+            {group.name}
+          </span>
+          <Badge variant="secondary" className="text-xs">
+            {group.providers.length}
+          </Badge>
+        </button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs"
+          onClick={onToggleExpanded}
+        >
+          {isExpanded
+            ? t("common.collapse", { defaultValue: "收起" })
+            : t("common.expand", { defaultValue: "展开" })}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              aria-label={t("provider.groupMenu", {
+                defaultValue: "分组菜单",
+              })}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuLabel className="truncate">
+              {group.name}
+            </DropdownMenuLabel>
+            <DropdownMenuItem onClick={onClearGroup}>
+              <Ungroup className="mr-2 h-4 w-4" />
+              {t("provider.clearGroup", { defaultValue: "取消分组" })}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="text-destructive focus:text-destructive"
+              onClick={onDeleteGroup}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              {t("provider.deleteGroupProviders", {
+                defaultValue: "删除组内供应商",
+              })}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      {isExpanded && <div className="space-y-3">{children}</div>}
+    </div>
+  );
 }
 
 function SortableProviderCard({
@@ -686,6 +1398,10 @@ function SortableProviderCard({
   activeProviderId,
   isDefaultModel,
   onSetAsDefault,
+  isGroupManageMode,
+  isSelected,
+  onToggleSelected,
+  groupMenu,
 }: SortableProviderCardProps) {
   const {
     setNodeRef,
@@ -702,7 +1418,17 @@ function SortableProviderCard({
   };
 
   return (
-    <div ref={setNodeRef} style={style}>
+    <div ref={setNodeRef} style={style} className="flex items-start gap-2">
+      {isGroupManageMode && (
+        <div className="pt-5">
+          <Checkbox
+            checked={isSelected}
+            aria-label="选择供应商"
+            onCheckedChange={(checked) => onToggleSelected(Boolean(checked))}
+          />
+        </div>
+      )}
+      <div className="min-w-0 flex-1">
       <ProviderCard
         provider={provider}
         isCurrent={isCurrent}
@@ -742,7 +1468,9 @@ function SortableProviderCard({
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}
         onSetAsDefault={onSetAsDefault}
+        groupMenu={groupMenu}
       />
+      </div>
     </div>
   );
 }

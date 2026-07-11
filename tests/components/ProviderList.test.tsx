@@ -306,4 +306,53 @@ describe("ProviderList Component", () => {
       screen.getByText("No providers match your search."),
     ).toBeInTheDocument();
   });
+
+  it("passes provider group metadata and a group action menu to every card", () => {
+    const groupedProvider = createProvider({
+      id: "grouped",
+      name: "Grouped Provider",
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+    const ungroupedProvider = createProvider({
+      id: "ungrouped",
+      name: "Ungrouped Provider",
+    });
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [groupedProvider, ungroupedProvider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ grouped: groupedProvider, ungrouped: ungroupedProvider }}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    const renderedCardProps = providerCardRenderSpy.mock.calls.map(
+      (call) => call[0] as { provider: Provider; groupMenu?: unknown },
+    );
+    const groupedCardProps = renderedCardProps.find(
+      (props) => props.provider.id === "grouped",
+    );
+    const ungroupedCardProps = renderedCardProps.find(
+      (props) => props.provider.id === "ungrouped",
+    );
+
+    expect(groupedCardProps?.provider.meta?.providerGroupName).toBe("Team");
+    expect(groupedCardProps?.groupMenu).toBeTruthy();
+    expect(ungroupedCardProps?.groupMenu).toBeTruthy();
+  });
 });

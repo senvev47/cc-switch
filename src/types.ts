@@ -230,6 +230,10 @@ export interface ProviderMeta {
   customUserAgent?: string;
   // Local proxy request overrides. Only applied by the local proxy after route transforms.
   localProxyRequestOverrides?: LocalProxyRequestOverrides;
+  // UI-only provider grouping metadata. Persisted with the provider record.
+  providerGroupId?: string;
+  providerGroupName?: string;
+  providerGroupSortIndex?: number;
   // 供应商类型（用于识别 Copilot 等特殊供应商）
   providerType?: string;
   // GitHub Copilot 关联账号 ID（旧字段，保留兼容读取）

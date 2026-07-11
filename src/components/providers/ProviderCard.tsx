@@ -1,5 +1,5 @@
-import { useMemo, useState, useEffect } from "react";
-import { GripVertical, ChevronDown, ChevronUp } from "lucide-react";
+import { useMemo, useState, useEffect, type ReactNode } from "react";
+import { GripVertical, ChevronDown, ChevronUp, Folder } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   DraggableAttributes,
@@ -68,6 +68,7 @@ interface ProviderCardProps {
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
+  groupMenu?: ReactNode;
 }
 
 /** 判断是否为官方供应商（无自定义 base URL / API key，直连官方 API） */
@@ -170,6 +171,7 @@ export function ProviderCard({
   // OpenClaw: default model
   isDefaultModel,
   onSetAsDefault,
+  groupMenu,
 }: ProviderCardProps) {
   const { t } = useTranslation();
 
@@ -357,6 +359,15 @@ export function ProviderCard({
               <h3 className="text-base font-semibold leading-none">
                 {provider.name}
               </h3>
+
+              {provider.meta?.providerGroupName && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                  <Folder className="h-3 w-3" />
+                  {provider.meta.providerGroupName}
+                </span>
+              )}
+
+              {groupMenu && <span className="shrink-0">{groupMenu}</span>}
 
               {isOmo && (
                 <span className="inline-flex items-center rounded-md bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
