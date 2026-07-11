@@ -1,10 +1,13 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactElement } from "react";
 import type { Provider } from "@/types";
 import { ProviderList } from "@/components/providers/ProviderList";
 
+const { modelTestProviderMock } = vi.hoisted(() => ({
+  modelTestProviderMock: vi.fn(),
+}));
 const useDragSortMock = vi.fn();
 const useSortableMock = vi.fn();
 const providerCardRenderSpy = vi.fn();
@@ -89,6 +92,10 @@ vi.mock("@/hooks/useStreamCheck", () => ({
   }),
 }));
 
+vi.mock("@/lib/api/model-test", () => ({
+  modelTestProvider: modelTestProviderMock,
+}));
+
 vi.mock("@/lib/query/failover", () => ({
   useAutoFailoverEnabled: () => ({ data: false }),
   useFailoverQueue: () => ({ data: [] }),
@@ -123,6 +130,7 @@ function renderWithQueryClient(ui: ReactElement) {
 beforeEach(() => {
   useDragSortMock.mockReset();
   useSortableMock.mockReset();
+  modelTestProviderMock.mockReset();
   providerCardRenderSpy.mockClear();
 
   useSortableMock.mockImplementation(({ id }: { id: string }) => ({
@@ -341,6 +349,8 @@ describe("ProviderList Component", () => {
       />,
     );
 
+    fireEvent.click(screen.getByText("Team"));
+
     const renderedCardProps = providerCardRenderSpy.mock.calls.map(
       (call) => call[0] as { provider: Provider; groupMenu?: unknown },
     );
@@ -402,5 +412,173 @@ describe("ProviderList Component", () => {
     expect(group).not.toHaveAttribute("style");
     expect(header).toHaveClass("sticky");
     expect(header).toHaveStyle({ top: "8px" });
+  });
+
+  it("shows the active provider URL in a collapsed group", () => {
+    const groupedProvider = createProvider({
+      id: "active-provider",
+      name: "Active Provider",
+      websiteUrl: "https://active.example.test/v1",
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [groupedProvider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ "active-provider": groupedProvider }}
+        currentProviderId="active-provider"
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("provider-group-active-url-group-team"),
+    ).toHaveTextContent("https://active.example.test/v1");
+  });
+
+  it("places a provider group between ungrouped provider cards by sort index", () => {
+    const before = createProvider({ id: "before", sortIndex: 0 });
+    const groupedFirst = createProvider({
+      id: "grouped-first",
+      sortIndex: 1,
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+    const groupedSecond = createProvider({
+      id: "grouped-second",
+      sortIndex: 2,
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+    const after = createProvider({ id: "after", sortIndex: 3 });
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [before, groupedFirst, groupedSecond, after],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{
+          before,
+          "grouped-first": groupedFirst,
+          "grouped-second": groupedSecond,
+          after,
+        }}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    const beforeCard = screen.getByTestId("provider-card-before");
+    const group = screen.getByTestId("provider-group-group-team");
+    const afterCard = screen.getByTestId("provider-card-after");
+
+    expect(
+      beforeCard.compareDocumentPosition(group) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(
+      group.compareDocumentPosition(afterCard) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
+
+  it("tests every provider in a group and renders the aggregate result", async () => {
+    const first = createProvider({
+      id: "group-first",
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+    const second = createProvider({
+      id: "group-second",
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+    modelTestProviderMock
+      .mockResolvedValueOnce({
+        status: "operational",
+        success: true,
+        message: "ok",
+        testedAt: 1,
+        retryCount: 0,
+      })
+      .mockResolvedValueOnce({
+        status: "degraded",
+        success: true,
+        message: "slow",
+        testedAt: 2,
+        retryCount: 0,
+      });
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [first, second],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ "group-first": first, "group-second": second }}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("provider-group-model-test-group-team"));
+
+    await waitFor(() => {
+      expect(modelTestProviderMock).toHaveBeenCalledTimes(2);
+    });
+
+    expect(modelTestProviderMock).toHaveBeenNthCalledWith(
+      1,
+      "claude",
+      "group-first",
+    );
+    expect(modelTestProviderMock).toHaveBeenNthCalledWith(
+      2,
+      "claude",
+      "group-second",
+    );
+    expect(
+      screen.getByTestId("provider-group-model-test-summary-group-team"),
+    ).toHaveTextContent("1");
   });
 });

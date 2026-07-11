@@ -31,8 +31,10 @@ import {
   Folder,
   FolderPlus,
   GripVertical,
+  LoaderCircle,
   MoreHorizontal,
   Search,
+  TestTube2,
   Trash2,
   Ungroup,
   X,
@@ -83,6 +85,7 @@ import {
   modelTestProvider,
   type StreamCheckResult,
 } from "@/lib/api/model-test";
+import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
 
 interface ProviderListProps {
   providers: Record<string, Provider>;
@@ -115,6 +118,26 @@ interface ProviderGroupView {
 
 const PROVIDER_GROUP_DND_PREFIX = "provider-group:";
 
+type ProviderListItem =
+  | {
+      kind: "group";
+      id: string;
+      group: ProviderGroupView;
+    }
+  | {
+      kind: "provider";
+      id: string;
+      provider: Provider;
+    };
+
+interface GroupModelTestSummary {
+  total: number;
+  completed: number;
+  operational: number;
+  degraded: number;
+  failed: number;
+}
+
 const getProviderGroup = (provider: Provider) => {
   const groupId = provider.meta?.providerGroupId?.trim();
   const groupName = provider.meta?.providerGroupName?.trim();
@@ -125,6 +148,58 @@ const getProviderGroup = (provider: Provider) => {
     name: groupName,
     sortIndex: provider.meta?.providerGroupSortIndex ?? Number.MAX_SAFE_INTEGER,
   };
+};
+
+const getProviderDisplayUrl = (provider: Provider): string | undefined => {
+  const notes = provider.notes?.trim();
+  if (notes && /^https?:\/\//i.test(notes)) return notes;
+  if (provider.websiteUrl?.trim()) return provider.websiteUrl.trim();
+
+  const config = provider.settingsConfig as Record<string, unknown>;
+  const env = config?.env as Record<string, unknown> | undefined;
+  const envBaseUrl = env?.ANTHROPIC_BASE_URL ?? env?.GOOGLE_GEMINI_BASE_URL;
+  if (typeof envBaseUrl === "string" && envBaseUrl.trim()) {
+    return envBaseUrl.trim();
+  }
+
+  const codexConfig = config?.config;
+  if (typeof codexConfig === "string" && codexConfig.includes("base_url")) {
+    return extractCodexBaseUrl(codexConfig);
+  }
+
+  return undefined;
+};
+
+const buildProviderListItems = (
+  orderedProviders: Provider[],
+  groups: ProviderGroupView[],
+): ProviderListItem[] => {
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+  const emittedGroupIds = new Set<string>();
+  const items: ProviderListItem[] = [];
+
+  orderedProviders.forEach((provider) => {
+    const providerGroup = getProviderGroup(provider);
+    const group = providerGroup
+      ? groupsById.get(providerGroup.id)
+      : undefined;
+
+    if (group) {
+      if (!emittedGroupIds.has(group.id)) {
+        emittedGroupIds.add(group.id);
+        items.push({
+          kind: "group",
+          id: `${PROVIDER_GROUP_DND_PREFIX}${group.id}`,
+          group,
+        });
+      }
+      return;
+    }
+
+    items.push({ kind: "provider", id: provider.id, provider });
+  });
+
+  return items;
 };
 
 const createProviderGroupId = (name: string) => {
@@ -166,6 +241,10 @@ export function ProviderList({
   >(null);
   const [modelTestResults, setModelTestResults] = useState<
     Record<string, StreamCheckResult>
+  >({});
+  const [groupTestingId, setGroupTestingId] = useState<string | null>(null);
+  const [groupModelTestSummaries, setGroupModelTestSummaries] = useState<
+    Record<string, GroupModelTestSummary>
   >({});
   const { sortedProviders, sensors, handleDragEnd } = useDragSort(
     providers,
@@ -368,6 +447,91 @@ export function ProviderList({
     [appId, t],
   );
 
+  const handleTestGroupModels = useCallback(
+    async (group: ProviderGroupView) => {
+      if (groupTestingId || group.providers.length === 0) return;
+
+      const summary: GroupModelTestSummary = {
+        total: group.providers.length,
+        completed: 0,
+        operational: 0,
+        degraded: 0,
+        failed: 0,
+      };
+      setGroupTestingId(group.id);
+      setGroupModelTestSummaries((current) => ({
+        ...current,
+        [group.id]: { ...summary },
+      }));
+
+      try {
+        for (const provider of group.providers) {
+          let result: StreamCheckResult;
+
+          try {
+            result = await modelTestProvider(appId, provider.id);
+          } catch (error) {
+            console.warn("[GroupModelTest] Failed:", error);
+            result = {
+              status: "failed",
+              success: false,
+              message: String(error),
+              testedAt: Date.now(),
+              retryCount: 0,
+            };
+          }
+
+          setModelTestResults((current) => ({
+            ...current,
+            [provider.id]: result,
+          }));
+          summary.completed += 1;
+          summary[result.status] += 1;
+          setGroupModelTestSummaries((current) => ({
+            ...current,
+            [group.id]: { ...summary },
+          }));
+        }
+
+        if (summary.failed > 0) {
+          toast.error(
+            t("provider.groupModelTestFailed", {
+              defaultValue:
+                "分组模型测试完成：{{operational}} 正常，{{degraded}} 降级，{{failed}} 失败",
+              operational: summary.operational,
+              degraded: summary.degraded,
+              failed: summary.failed,
+            }),
+            { closeButton: true },
+          );
+        } else if (summary.degraded > 0) {
+          toast.warning(
+            t("provider.groupModelTestDegraded", {
+              defaultValue:
+                "分组模型测试完成：{{operational}} 正常，{{degraded}} 降级",
+              operational: summary.operational,
+              degraded: summary.degraded,
+            }),
+            { closeButton: true },
+          );
+        } else {
+          toast.success(
+            t("provider.groupModelTestSuccess", {
+              defaultValue: "分组模型测试完成：{{operational}} 个供应商正常",
+              operational: summary.operational,
+            }),
+            { closeButton: true },
+          );
+        }
+      } finally {
+        setGroupTestingId((current) =>
+          current === group.id ? null : current,
+        );
+      }
+    },
+    [appId, groupTestingId, t],
+  );
+
   // Import current live config as default provider
   const importMutation = useMutation({
     mutationFn: async (): Promise<boolean> => {
@@ -482,18 +646,15 @@ export function ProviderList({
   const filteredProviderGroups = useMemo(() => {
     const groupMap = new Map(providerGroups.map((group) => [group.id, group]));
     const visibleGroups = new Map<string, ProviderGroupView>();
-    const ungrouped: Provider[] = [];
 
     filteredProviders.forEach((provider) => {
       const group = getProviderGroup(provider);
       if (!group) {
-        ungrouped.push(provider);
         return;
       }
 
       const sourceGroup = groupMap.get(group.id);
       if (!sourceGroup) {
-        ungrouped.push(provider);
         return;
       }
 
@@ -515,9 +676,22 @@ export function ProviderList({
         if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
         return a.name.localeCompare(b.name);
       }),
-      ungrouped,
     };
   }, [filteredProviders, providerGroups]);
+
+  const visibleProviderListItems = useMemo(
+    () =>
+      buildProviderListItems(
+        filteredProviders,
+        filteredProviderGroups.groups,
+      ),
+    [filteredProviderGroups.groups, filteredProviders],
+  );
+
+  const allProviderListItems = useMemo(
+    () => buildProviderListItems(sortedProviders, providerGroups),
+    [providerGroups, sortedProviders],
+  );
 
   useEffect(() => {
     setSelectedProviderIds((current) => {
@@ -844,35 +1018,29 @@ export function ProviderList({
         return;
       }
 
-      if (!overId.startsWith(PROVIDER_GROUP_DND_PREFIX)) return;
-
-      const oldIndex = providerGroups.findIndex(
-        (group) => `${PROVIDER_GROUP_DND_PREFIX}${group.id}` === activeId,
+      const oldIndex = allProviderListItems.findIndex(
+        (item) => item.id === activeId,
       );
-      const newIndex = providerGroups.findIndex(
-        (group) => `${PROVIDER_GROUP_DND_PREFIX}${group.id}` === overId,
-      );
+      const newIndex = allProviderListItems.findIndex((item) => {
+        if (item.id === overId) return true;
+        return (
+          item.kind === "group" &&
+          item.group.providers.some((provider) => provider.id === overId)
+        );
+      });
       if (oldIndex === -1 || newIndex === -1) return;
 
-      const reordered = arrayMove(providerGroups, oldIndex, newIndex);
+      const reordered = arrayMove(allProviderListItems, oldIndex, newIndex);
+      const reorderedProviders = reordered.flatMap((item) =>
+        item.kind === "group" ? item.group.providers : [item.provider],
+      );
       try {
-        await Promise.all(
-          reordered.flatMap((group, index) =>
-            group.providers.map((provider) =>
-              providersApi.update(
-                {
-                  ...provider,
-                  meta: {
-                    ...(provider.meta ?? {}),
-                    providerGroupId: group.id,
-                    providerGroupName: group.name,
-                    providerGroupSortIndex: index,
-                  },
-                },
-                appId,
-              ),
-            ),
-          ),
+        await providersApi.updateSortOrder(
+          reorderedProviders.map((provider, index) => ({
+            id: provider.id,
+            sortIndex: index,
+          })),
+          appId,
         );
         await refreshProviderViews();
         toast.success(
@@ -892,10 +1060,10 @@ export function ProviderList({
     },
     [
       appId,
+      allProviderListItems,
       assignProvidersToExistingGroup,
       clearProviderGroupDragState,
       handleDragEnd,
-      providerGroups,
       refreshProviderViews,
       resolveProviderGroupDropTarget,
       sortedProviders,
@@ -1184,10 +1352,10 @@ export function ProviderList({
 
   const renderProviderList = () => {
     const sortableItems = [
-      ...filteredProviderGroups.groups.map(
-        (group) => `${PROVIDER_GROUP_DND_PREFIX}${group.id}`,
+      ...visibleProviderListItems.map((item) => item.id),
+      ...filteredProviderGroups.groups.flatMap((group) =>
+        group.providers.map((provider) => provider.id),
       ),
-      ...filteredProviders.map((provider) => provider.id),
     ];
 
     return (
@@ -1201,7 +1369,12 @@ export function ProviderList({
       >
         <SortableContext items={sortableItems} strategy={verticalListSortingStrategy}>
           <div className="space-y-3">
-            {filteredProviderGroups.groups.map((group) => {
+            {visibleProviderListItems.map((item) => {
+              if (item.kind === "provider") {
+                return renderProviderCard(item.provider);
+              }
+
+              const group = item.group;
               const fullGroup =
                 providerGroups.find((candidate) => candidate.id === group.id) ??
                 group;
@@ -1217,6 +1390,9 @@ export function ProviderList({
                     providerGroupDropTargetId === group.id
                   }
                   stickyTopOffset={groupControlsHeight + 8}
+                  isTestingModels={groupTestingId === group.id}
+                  isTestModelsDisabled={groupTestingId !== null}
+                  modelTestSummary={groupModelTestSummaries[group.id]}
                   onToggleExpanded={() => {
                     setExpandedProviderGroupIds((current) => {
                       const next = new Set(current);
@@ -1230,6 +1406,7 @@ export function ProviderList({
                   }}
                   onDeleteGroup={() => void deleteProviderGroup(fullGroup)}
                   onClearGroup={() => void clearProvidersGroup(fullGroup.providers)}
+                  onTestModels={() => void handleTestGroupModels(fullGroup)}
                 >
                   {group.providers.map((provider) =>
                     renderProviderCard(provider),
@@ -1238,23 +1415,6 @@ export function ProviderList({
               );
             })}
 
-            {filteredProviderGroups.ungrouped.length > 0 && (
-              <div className="space-y-3">
-                {filteredProviderGroups.groups.length > 0 && (
-                  <div className="flex items-center gap-2 px-1 text-xs font-medium text-muted-foreground">
-                    <span className="h-px flex-1 bg-border" />
-                    {t("provider.ungrouped", { defaultValue: "未分组" })}
-                    <Badge variant="outline" className="text-[10px]">
-                      {filteredProviderGroups.ungrouped.length}
-                    </Badge>
-                    <span className="h-px flex-1 bg-border" />
-                  </div>
-                )}
-                {filteredProviderGroups.ungrouped.map((provider) =>
-                  renderProviderCard(provider),
-                )}
-              </div>
-            )}
           </div>
         </SortableContext>
       </DndContext>
@@ -1480,9 +1640,13 @@ interface SortableProviderGroupProps {
   activeProvider?: Provider;
   isDropTarget: boolean;
   stickyTopOffset: number;
+  isTestingModels: boolean;
+  isTestModelsDisabled: boolean;
+  modelTestSummary?: GroupModelTestSummary;
   onToggleExpanded: () => void;
   onDeleteGroup: () => void;
   onClearGroup: () => void;
+  onTestModels: () => void;
   children: ReactNode;
 }
 
@@ -1492,9 +1656,13 @@ function SortableProviderGroup({
   activeProvider,
   isDropTarget,
   stickyTopOffset,
+  isTestingModels,
+  isTestModelsDisabled,
+  modelTestSummary,
   onToggleExpanded,
   onDeleteGroup,
   onClearGroup,
+  onTestModels,
   children,
 }: SortableProviderGroupProps) {
   const { t } = useTranslation();
@@ -1506,6 +1674,9 @@ function SortableProviderGroup({
     transition,
     isDragging,
   } = useSortable({ id: `${PROVIDER_GROUP_DND_PREFIX}${group.id}` });
+  const activeProviderUrl = activeProvider
+    ? getProviderDisplayUrl(activeProvider)
+    : undefined;
 
   // A transformed ancestor can stop sticky descendants from following the
   // provider scrollport in WebView. Only apply DnD positioning while needed.
@@ -1573,14 +1744,80 @@ function SortableProviderGroup({
         {!isExpanded && activeProvider && (
           <div className="flex min-w-0 max-w-[42%] flex-1 items-center gap-1.5 rounded-md border border-emerald-300/70 bg-emerald-100/80 px-2 py-1 text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/70 dark:text-emerald-200">
             <Activity className="h-3.5 w-3.5 shrink-0" />
-            <span className="shrink-0 text-[11px] font-medium">
-              {t("provider.groupActiveProvider", { defaultValue: "正在使用" })}
+            <div className="min-w-0 flex-1 leading-tight">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="shrink-0 text-[11px] font-medium">
+                  {t("provider.groupActiveProvider", {
+                    defaultValue: "正在使用",
+                  })}
+                </span>
+                <span className="min-w-0 truncate text-xs font-semibold">
+                  {activeProvider.name}
+                </span>
+              </div>
+              {activeProviderUrl && (
+                <span
+                  data-testid={`provider-group-active-url-${group.id}`}
+                  title={activeProviderUrl}
+                  className="mt-0.5 block truncate text-[10px] text-emerald-700/85 dark:text-emerald-300/85"
+                >
+                  {activeProviderUrl}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+        {modelTestSummary && (
+          <div
+            data-testid={`provider-group-model-test-summary-${group.id}`}
+            title={t("provider.groupModelTestSummary", {
+              defaultValue:
+                "模型测试：{{operational}} 正常，{{degraded}} 降级，{{failed}} 失败",
+              operational: modelTestSummary.operational,
+              degraded: modelTestSummary.degraded,
+              failed: modelTestSummary.failed,
+            })}
+            className="hidden shrink-0 items-center gap-1.5 text-[10px] sm:flex"
+          >
+            {isTestingModels && (
+              <span className="text-muted-foreground">
+                {modelTestSummary.completed}/{modelTestSummary.total}
+              </span>
+            )}
+            <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              {modelTestSummary.operational}
             </span>
-            <span className="min-w-0 truncate text-xs font-semibold">
-              {activeProvider.name}
+            <span className="inline-flex items-center gap-1 text-yellow-700 dark:text-yellow-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-yellow-500" />
+              {modelTestSummary.degraded}
+            </span>
+            <span className="inline-flex items-center gap-1 text-red-700 dark:text-red-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+              {modelTestSummary.failed}
             </span>
           </div>
         )}
+        <Button
+          variant="ghost"
+          size="icon"
+          data-testid={`provider-group-model-test-${group.id}`}
+          className="h-7 w-7"
+          disabled={isTestModelsDisabled}
+          onClick={onTestModels}
+          title={t("provider.testGroupModels", {
+            defaultValue: "测试分组模型",
+          })}
+          aria-label={t("provider.testGroupModels", {
+            defaultValue: "测试分组模型",
+          })}
+        >
+          {isTestingModels ? (
+            <LoaderCircle className="h-4 w-4 animate-spin" />
+          ) : (
+            <TestTube2 className="h-4 w-4" />
+          )}
+        </Button>
         <Button
           variant="ghost"
           size="icon"
