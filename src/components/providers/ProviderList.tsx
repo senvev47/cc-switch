@@ -1,5 +1,12 @@
 import { CSS } from "@dnd-kit/utilities";
-import { DndContext, closestCenter, type DragEndEvent } from "@dnd-kit/core";
+import {
+  DndContext,
+  closestCenter,
+  type DragCancelEvent,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from "@dnd-kit/core";
 import {
   arrayMove,
   SortableContext,
@@ -17,7 +24,9 @@ import {
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Activity,
   AlertTriangle,
+  ChevronDown,
   CheckSquare,
   Folder,
   FolderPlus,
@@ -169,6 +178,14 @@ export function ProviderList({
   const [expandedProviderGroupIds, setExpandedProviderGroupIds] = useState<
     Set<string>
   >(() => new Set());
+  const [draggedProviderId, setDraggedProviderId] = useState<string | null>(
+    null,
+  );
+  const [providerGroupDropTargetId, setProviderGroupDropTargetId] = useState<
+    string | null
+  >(null);
+  const groupControlsRef = useRef<HTMLDivElement>(null);
+  const [groupControlsHeight, setGroupControlsHeight] = useState(0);
 
   const { data: opencodeLiveIds } = useQuery({
     queryKey: ["opencodeLiveProviderIds"],
@@ -522,24 +539,14 @@ export function ProviderList({
     setExpandedProviderGroupIds((current) => {
       const knownGroupIds = new Set(providerGroups.map((group) => group.id));
       const next = new Set<string>();
-      let changed = false;
 
       current.forEach((groupId) => {
         if (knownGroupIds.has(groupId)) {
           next.add(groupId);
-        } else {
-          changed = true;
         }
       });
 
-      providerGroups.forEach((group) => {
-        if (!current.has(group.id)) {
-          next.add(group.id);
-          changed = true;
-        }
-      });
-
-      return changed ? next : current;
+      return next.size === current.size ? current : next;
     });
   }, [providerGroups]);
 
@@ -548,6 +555,27 @@ export function ProviderList({
 
     setIsGroupManageMode(false);
     setSelectedProviderIds(new Set());
+  }, [providerGroups.length]);
+
+  useEffect(() => {
+    if (providerGroups.length === 0) {
+      setGroupControlsHeight(0);
+      return;
+    }
+
+    const controls = groupControlsRef.current;
+    if (!controls) return;
+
+    const updateHeight = () => {
+      setGroupControlsHeight(controls.getBoundingClientRect().height);
+    };
+
+    updateHeight();
+    if (typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(controls);
+    return () => observer.disconnect();
   }, [providerGroups.length]);
 
   const selectedProviders = useMemo(
@@ -574,8 +602,8 @@ export function ProviderList({
     async (
       targets: Provider[],
       group: { id: string; name: string; sortIndex?: number } | null,
-    ) => {
-      if (targets.length === 0) return;
+    ): Promise<boolean> => {
+      if (targets.length === 0) return false;
 
       const updates = targets.map((provider) => {
         const meta = { ...(provider.meta ?? {}) };
@@ -608,6 +636,7 @@ export function ProviderList({
               }),
           { closeButton: true },
         );
+        return true;
       } catch (error) {
         console.error("Failed to update provider group", error);
         toast.error(
@@ -615,6 +644,7 @@ export function ProviderList({
             defaultValue: "分组更新失败",
           }),
         );
+        return false;
       }
     },
     [appId, refreshProviderViews, t],
@@ -634,22 +664,28 @@ export function ProviderList({
     async (targets: Provider[]) => {
       const name = promptForGroupName();
       if (!name) return;
-      await updateProviderGroupMeta(targets, {
+      const updated = await updateProviderGroupMeta(targets, {
         id: createProviderGroupId(name),
         name,
         sortIndex: providerGroups.length,
       });
+      if (updated) {
+        setSelectedProviderIds(new Set());
+      }
     },
     [promptForGroupName, providerGroups.length, updateProviderGroupMeta],
   );
 
   const assignProvidersToExistingGroup = useCallback(
     async (targets: Provider[], group: ProviderGroupView) => {
-      await updateProviderGroupMeta(targets, {
+      const updated = await updateProviderGroupMeta(targets, {
         id: group.id,
         name: group.name,
         sortIndex: group.sortIndex,
       });
+      if (updated) {
+        setSelectedProviderIds(new Set());
+      }
     },
     [updateProviderGroupMeta],
   );
@@ -659,6 +695,78 @@ export function ProviderList({
       await updateProviderGroupMeta(targets, null);
     },
     [updateProviderGroupMeta],
+  );
+
+  const resolveProviderGroupDropTarget = useCallback(
+    (dropTargetId: string): ProviderGroupView | undefined => {
+      if (dropTargetId.startsWith(PROVIDER_GROUP_DND_PREFIX)) {
+        const groupId = dropTargetId.slice(PROVIDER_GROUP_DND_PREFIX.length);
+        return providerGroups.find((group) => group.id === groupId);
+      }
+
+      const overProvider = sortedProviders.find(
+        (provider) => provider.id === dropTargetId,
+      );
+      const overProviderGroup = overProvider
+        ? getProviderGroup(overProvider)
+        : null;
+      if (!overProviderGroup) return undefined;
+
+      return providerGroups.find(
+        (group) => group.id === overProviderGroup.id,
+      );
+    },
+    [providerGroups, sortedProviders],
+  );
+
+  const clearProviderGroupDragState = useCallback(() => {
+    setDraggedProviderId(null);
+    setProviderGroupDropTargetId(null);
+  }, []);
+
+  const handleProviderDragStart = useCallback(
+    (event: DragStartEvent) => {
+      const providerId = String(event.active.id);
+      setDraggedProviderId(
+        sortedProviders.some((provider) => provider.id === providerId)
+          ? providerId
+          : null,
+      );
+      setProviderGroupDropTargetId(null);
+    },
+    [sortedProviders],
+  );
+
+  const handleProviderDragOver = useCallback(
+    (event: DragOverEvent) => {
+      const providerId = String(event.active.id);
+      const provider = sortedProviders.find(
+        (candidate) => candidate.id === providerId,
+      );
+      if (!provider || !event.over) {
+        setProviderGroupDropTargetId(null);
+        return;
+      }
+
+      const targetGroup = resolveProviderGroupDropTarget(String(event.over.id));
+      const sourceGroup = getProviderGroup(provider);
+      const nextTargetId =
+        targetGroup && targetGroup.id !== sourceGroup?.id
+          ? targetGroup.id
+          : null;
+
+      setProviderGroupDropTargetId((current) =>
+        current === nextTargetId ? current : nextTargetId,
+      );
+    },
+    [resolveProviderGroupDropTarget, sortedProviders],
+  );
+
+  const handleProviderDragCancel = useCallback(
+    (_event: DragCancelEvent) => {
+      clearProviderGroupDragState();
+    },
+    [clearProviderGroupDragState],
   );
 
   const deleteProviderGroup = useCallback(
@@ -712,17 +820,31 @@ export function ProviderList({
   const reorderProviderGroups = useCallback(
     async (event: DragEndEvent) => {
       const { active, over } = event;
+      clearProviderGroupDragState();
       if (!over || active.id === over.id) return;
 
       const activeId = String(active.id);
       const overId = String(over.id);
-      if (
-        !activeId.startsWith(PROVIDER_GROUP_DND_PREFIX) ||
-        !overId.startsWith(PROVIDER_GROUP_DND_PREFIX)
-      ) {
+
+      if (!activeId.startsWith(PROVIDER_GROUP_DND_PREFIX)) {
+        const activeProvider = sortedProviders.find(
+          (provider) => provider.id === activeId,
+        );
+        const targetGroup = resolveProviderGroupDropTarget(overId);
+
+        if (activeProvider && targetGroup) {
+          const activeProviderGroup = getProviderGroup(activeProvider);
+          if (activeProviderGroup?.id !== targetGroup.id) {
+            await assignProvidersToExistingGroup([activeProvider], targetGroup);
+            return;
+          }
+        }
+
         handleDragEnd(event);
         return;
       }
+
+      if (!overId.startsWith(PROVIDER_GROUP_DND_PREFIX)) return;
 
       const oldIndex = providerGroups.findIndex(
         (group) => `${PROVIDER_GROUP_DND_PREFIX}${group.id}` === activeId,
@@ -768,7 +890,17 @@ export function ProviderList({
         );
       }
     },
-    [appId, handleDragEnd, providerGroups, refreshProviderViews, t],
+    [
+      appId,
+      assignProvidersToExistingGroup,
+      clearProviderGroupDragState,
+      handleDragEnd,
+      providerGroups,
+      refreshProviderViews,
+      resolveProviderGroupDropTarget,
+      sortedProviders,
+      t,
+    ],
   );
 
   const toggleProviderSelected = useCallback(
@@ -859,6 +991,38 @@ export function ProviderList({
     return messages;
   }, [appId, claudeDesktopStatus, t]);
 
+  const getActiveProviderInGroup = useCallback(
+    (group: ProviderGroupView) =>
+      group.providers.find((provider) => {
+        if (provider.category === "omo") {
+          return provider.id === (currentOmoId || "");
+        }
+        if (provider.category === "omo-slim") {
+          return provider.id === (currentOmoSlimId || "");
+        }
+        if (appId === "openclaw") {
+          return isProviderDefaultModel(provider.id);
+        }
+        if (appId === "opencode") return false;
+        if (appId === "hermes") {
+          return provider.id === hermesCurrentProviderId;
+        }
+        return isFailoverModeActive
+          ? activeProviderId === provider.id
+          : provider.id === currentProviderId;
+      }),
+    [
+      activeProviderId,
+      appId,
+      currentOmoId,
+      currentOmoSlimId,
+      currentProviderId,
+      hermesCurrentProviderId,
+      isFailoverModeActive,
+      isProviderDefaultModel,
+    ],
+  );
+
   if (isLoading) {
     return (
       <div className="space-y-3">
@@ -885,53 +1049,72 @@ export function ProviderList({
   const renderProviderGroupMenu = (
     targets: Provider[],
     compact = false,
-  ) => (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant={compact ? "ghost" : "secondary"}
-          size={compact ? "icon" : "sm"}
-          className={
-            compact ? "h-8 w-8 p-1" : "h-7 gap-1.5 px-2.5 text-xs"
-          }
-          disabled={targets.length === 0}
-          title={
-            compact
-              ? t("provider.joinGroup", { defaultValue: "加入分组" })
-              : undefined
-          }
-          aria-label={t("provider.joinGroup", { defaultValue: "加入分组" })}
-        >
-          <FolderPlus className="h-4 w-4" />
-          {!compact && t("provider.joinGroup", { defaultValue: "加入分组" })}
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-52">
-        <DropdownMenuLabel>
-          {t("provider.groupAction", { defaultValue: "分组操作" })}
-        </DropdownMenuLabel>
-        <DropdownMenuItem onClick={() => void createGroupForProviders(targets)}>
-          <FolderPlus className="mr-2 h-4 w-4" />
-          {t("provider.createNewGroup", { defaultValue: "新建分组" })}
-        </DropdownMenuItem>
-        {providerGroups.length > 0 && <DropdownMenuSeparator />}
-        {providerGroups.map((group) => (
-          <DropdownMenuItem
-            key={group.id}
-            onClick={() => void assignProvidersToExistingGroup(targets, group)}
+  ) => {
+    const canClearGroup = targets.some((provider) =>
+      Boolean(getProviderGroup(provider)),
+    );
+
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant={compact ? "ghost" : "secondary"}
+            size={compact ? "icon" : "sm"}
+            className={
+              compact ? "h-8 w-8 p-1" : "h-7 gap-1.5 px-2.5 text-xs"
+            }
+            disabled={targets.length === 0}
+            title={
+              compact
+                ? t("provider.joinGroup", { defaultValue: "加入分组" })
+                : undefined
+            }
+            aria-label={t("provider.joinGroup", {
+              defaultValue: "加入分组",
+            })}
           >
-            <Folder className="mr-2 h-4 w-4" />
-            <span className="truncate">{group.name}</span>
+            <FolderPlus className="h-4 w-4" />
+            {!compact &&
+              t("provider.joinGroup", { defaultValue: "加入分组" })}
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-52">
+          <DropdownMenuLabel>
+            {t("provider.groupAction", { defaultValue: "分组操作" })}
+          </DropdownMenuLabel>
+          <DropdownMenuItem
+            onClick={() => void createGroupForProviders(targets)}
+          >
+            <FolderPlus className="mr-2 h-4 w-4" />
+            {t("provider.createNewGroup", { defaultValue: "新建分组" })}
           </DropdownMenuItem>
-        ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={() => void clearProvidersGroup(targets)}>
-          <Ungroup className="mr-2 h-4 w-4" />
-          {t("provider.clearGroup", { defaultValue: "取消分组" })}
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
+          {providerGroups.length > 0 && <DropdownMenuSeparator />}
+          {providerGroups.map((group) => (
+            <DropdownMenuItem
+              key={group.id}
+              onClick={() =>
+                void assignProvidersToExistingGroup(targets, group)
+              }
+            >
+              <Folder className="mr-2 h-4 w-4" />
+              <span className="truncate">{group.name}</span>
+            </DropdownMenuItem>
+          ))}
+          {canClearGroup && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => void clearProvidersGroup(targets)}
+              >
+                <Ungroup className="mr-2 h-4 w-4" />
+                {t("provider.clearGroup", { defaultValue: "取消分组" })}
+              </DropdownMenuItem>
+            </>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  };
 
   const renderProviderCard = (provider: Provider) => {
     const isOmo = provider.category === "omo";
@@ -1011,6 +1194,9 @@ export function ProviderList({
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
+        onDragStart={handleProviderDragStart}
+        onDragOver={handleProviderDragOver}
+        onDragCancel={handleProviderDragCancel}
         onDragEnd={reorderProviderGroups}
       >
         <SortableContext items={sortableItems} strategy={verticalListSortingStrategy}>
@@ -1025,6 +1211,12 @@ export function ProviderList({
                   key={group.id}
                   group={group}
                   isExpanded={expandedProviderGroupIds.has(group.id)}
+                  activeProvider={getActiveProviderInGroup(fullGroup)}
+                  isDropTarget={
+                    draggedProviderId !== null &&
+                    providerGroupDropTargetId === group.id
+                  }
+                  stickyTopOffset={groupControlsHeight + 8}
                   onToggleExpanded={() => {
                     setExpandedProviderGroupIds((current) => {
                       const next = new Set(current);
@@ -1151,7 +1343,10 @@ export function ProviderList({
       </AnimatePresence>
 
       {providerGroups.length > 0 && (
-        <div className="rounded-lg border bg-muted/30 px-3 py-2.5">
+        <div
+          ref={groupControlsRef}
+          className="sticky top-0 z-30 rounded-lg border border-cyan-300/70 bg-background/95 px-3 py-2.5 shadow-sm backdrop-blur dark:border-cyan-900/70"
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2 text-sm">
               <Folder className="h-4 w-4 text-muted-foreground" />
@@ -1281,6 +1476,9 @@ interface SortableProviderCardProps {
 interface SortableProviderGroupProps {
   group: ProviderGroupView;
   isExpanded: boolean;
+  activeProvider?: Provider;
+  isDropTarget: boolean;
+  stickyTopOffset: number;
   onToggleExpanded: () => void;
   onDeleteGroup: () => void;
   onClearGroup: () => void;
@@ -1290,6 +1488,9 @@ interface SortableProviderGroupProps {
 function SortableProviderGroup({
   group,
   isExpanded,
+  activeProvider,
+  isDropTarget,
+  stickyTopOffset,
   onToggleExpanded,
   onDeleteGroup,
   onClearGroup,
@@ -1309,17 +1510,26 @@ function SortableProviderGroup({
     transform: CSS.Transform.toString(transform),
     transition,
   };
+  const headerStyle: CSSProperties = { top: stickyTopOffset };
 
   return (
     <div
       ref={setNodeRef}
       style={style}
       className={cn(
-        "rounded-xl border bg-muted/20 p-3 transition-all",
+        "relative rounded-xl border border-cyan-300/70 bg-cyan-50/55 p-2.5 transition-all dark:border-cyan-900/70 dark:bg-cyan-950/20",
+        isDropTarget &&
+          "border-primary bg-primary/10 shadow-md ring-2 ring-primary/30",
         isDragging && "z-10 scale-[1.01] border-primary shadow-lg",
       )}
     >
-      <div className="mb-3 flex items-center gap-2">
+      <div
+        style={headerStyle}
+        className={cn(
+          "sticky z-20 mb-3 flex items-center gap-2 rounded-lg border border-cyan-200/90 bg-cyan-50/95 px-2.5 py-2 shadow-sm backdrop-blur dark:border-cyan-900/80 dark:bg-cyan-950/95",
+          isDropTarget && "border-primary bg-primary/10",
+        )}
+      >
         <button
           type="button"
           className={cn(
@@ -1347,15 +1557,39 @@ function SortableProviderGroup({
             {group.providers.length}
           </Badge>
         </button>
+        {!isExpanded && activeProvider && (
+          <div className="flex min-w-0 max-w-[42%] flex-1 items-center gap-1.5 rounded-md border border-emerald-300/70 bg-emerald-100/80 px-2 py-1 text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/70 dark:text-emerald-200">
+            <Activity className="h-3.5 w-3.5 shrink-0" />
+            <span className="shrink-0 text-[11px] font-medium">
+              {t("provider.groupActiveProvider", { defaultValue: "正在使用" })}
+            </span>
+            <span className="min-w-0 truncate text-xs font-semibold">
+              {activeProvider.name}
+            </span>
+          </div>
+        )}
         <Button
           variant="ghost"
-          size="sm"
-          className="h-7 px-2 text-xs"
+          size="icon"
+          className="h-7 w-7"
           onClick={onToggleExpanded}
+          title={
+            isExpanded
+              ? t("common.collapse", { defaultValue: "收起" })
+              : t("common.expand", { defaultValue: "展开" })
+          }
+          aria-label={
+            isExpanded
+              ? t("common.collapse", { defaultValue: "收起" })
+              : t("common.expand", { defaultValue: "展开" })
+          }
         >
-          {isExpanded
-            ? t("common.collapse", { defaultValue: "收起" })
-            : t("common.expand", { defaultValue: "展开" })}
+          <ChevronDown
+            className={cn(
+              "h-4 w-4 transition-transform",
+              isExpanded && "rotate-180",
+            )}
+          />
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -1391,7 +1625,9 @@ function SortableProviderGroup({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-      {isExpanded && <div className="space-y-3">{children}</div>}
+      {isExpanded && (
+        <div className="space-y-3 px-0.5 pb-0.5">{children}</div>
+      )}
     </div>
   );
 }
