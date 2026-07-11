@@ -2,6 +2,9 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   DndContext,
   closestCenter,
+  pointerWithin,
+  useDroppable,
+  type CollisionDetection,
   type DragCancelEvent,
   type DragEndEvent,
   type DragOverEvent,
@@ -20,6 +23,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -117,6 +121,12 @@ interface ProviderGroupView {
 }
 
 const PROVIDER_GROUP_DND_PREFIX = "provider-group:";
+const PROVIDER_GROUP_DROP_DND_PREFIX = "provider-group-drop:";
+
+interface ProviderSelectionSwipe {
+  pointerId: number;
+  checked: boolean;
+}
 
 type ProviderListItem =
   | {
@@ -263,6 +273,9 @@ export function ProviderList({
   const [providerGroupDropTargetId, setProviderGroupDropTargetId] = useState<
     string | null
   >(null);
+  const providerSelectionSwipeRef = useRef<ProviderSelectionSwipe | null>(
+    null,
+  );
   const groupControlsRef = useRef<HTMLDivElement>(null);
   const [groupControlsHeight, setGroupControlsHeight] = useState(0);
 
@@ -873,24 +886,16 @@ export function ProviderList({
 
   const resolveProviderGroupDropTarget = useCallback(
     (dropTargetId: string): ProviderGroupView | undefined => {
-      if (dropTargetId.startsWith(PROVIDER_GROUP_DND_PREFIX)) {
-        const groupId = dropTargetId.slice(PROVIDER_GROUP_DND_PREFIX.length);
-        return providerGroups.find((group) => group.id === groupId);
+      if (!dropTargetId.startsWith(PROVIDER_GROUP_DROP_DND_PREFIX)) {
+        return undefined;
       }
 
-      const overProvider = sortedProviders.find(
-        (provider) => provider.id === dropTargetId,
+      const groupId = dropTargetId.slice(
+        PROVIDER_GROUP_DROP_DND_PREFIX.length,
       );
-      const overProviderGroup = overProvider
-        ? getProviderGroup(overProvider)
-        : null;
-      if (!overProviderGroup) return undefined;
-
-      return providerGroups.find(
-        (group) => group.id === overProviderGroup.id,
-      );
+      return providerGroups.find((group) => group.id === groupId);
     },
-    [providerGroups, sortedProviders],
+    [providerGroups],
   );
 
   const clearProviderGroupDragState = useCallback(() => {
@@ -934,6 +939,21 @@ export function ProviderList({
       );
     },
     [resolveProviderGroupDropTarget, sortedProviders],
+  );
+
+  const groupAwareCollisionDetection = useCallback<CollisionDetection>(
+    (args) => {
+      if (String(args.active.id).startsWith(PROVIDER_GROUP_DND_PREFIX)) {
+        return closestCenter(args);
+      }
+
+      const groupDropCollision = pointerWithin(args).find((collision) =>
+        String(collision.id).startsWith(PROVIDER_GROUP_DROP_DND_PREFIX),
+      );
+
+      return groupDropCollision ? [groupDropCollision] : closestCenter(args);
+    },
+    [],
   );
 
   const handleProviderDragCancel = useCallback(
@@ -991,6 +1011,70 @@ export function ProviderList({
     [appId, refreshProviderViews, t],
   );
 
+  const persistProviderListItemOrder = useCallback(
+    async (items: ProviderListItem[]) => {
+      const orderedProviders = items.flatMap((item) =>
+        item.kind === "group" ? item.group.providers : [item.provider],
+      );
+
+      try {
+        await providersApi.updateSortOrder(
+          orderedProviders.map((provider, index) => ({
+            id: provider.id,
+            sortIndex: index,
+          })),
+          appId,
+        );
+        await refreshProviderViews();
+        toast.success(
+          t("provider.groupSortUpdated", {
+            defaultValue: "Provider order updated",
+          }),
+          { closeButton: true },
+        );
+      } catch (error) {
+        console.error("Failed to reorder provider groups", error);
+        toast.error(
+          t("provider.groupSortUpdateFailed", {
+            defaultValue: "Failed to update provider order",
+          }),
+        );
+      }
+    },
+    [appId, refreshProviderViews, t],
+  );
+
+  const reorderUngroupedProviderAroundGroup = useCallback(
+    async (
+      provider: Provider,
+      targetGroup: ProviderGroupView,
+      placement: "before" | "after",
+    ) => {
+      const activeItem = allProviderListItems.find(
+        (item) => item.kind === "provider" && item.provider.id === provider.id,
+      );
+      if (!activeItem) return;
+
+      const itemsWithoutActiveProvider = allProviderListItems.filter(
+        (item) => item.id !== activeItem.id,
+      );
+      const targetIndex = itemsWithoutActiveProvider.findIndex(
+        (item) =>
+          item.kind === "group" && item.group.id === targetGroup.id,
+      );
+      if (targetIndex === -1) return;
+
+      const nextItems = [...itemsWithoutActiveProvider];
+      nextItems.splice(
+        targetIndex + (placement === "after" ? 1 : 0),
+        0,
+        activeItem,
+      );
+      await persistProviderListItemOrder(nextItems);
+    },
+    [allProviderListItems, persistProviderListItemOrder],
+  );
+
   const reorderProviderGroups = useCallback(
     async (event: DragEndEvent) => {
       const { active, over } = event;
@@ -1012,6 +1096,29 @@ export function ProviderList({
             await assignProvidersToExistingGroup([activeProvider], targetGroup);
             return;
           }
+        }
+
+        const rootTargetGroup = overId.startsWith(PROVIDER_GROUP_DND_PREFIX)
+          ? providerGroups.find(
+              (group) =>
+                group.id ===
+                overId.slice(PROVIDER_GROUP_DND_PREFIX.length),
+            )
+          : undefined;
+        if (activeProvider && !getProviderGroup(activeProvider) && rootTargetGroup) {
+          const activeRect = active.rect.current.translated;
+          const placement =
+            activeRect &&
+            activeRect.top + activeRect.height / 2 >=
+              over.rect.top + over.rect.height / 2
+              ? "after"
+              : "before";
+          await reorderUngroupedProviderAroundGroup(
+            activeProvider,
+            rootTargetGroup,
+            placement,
+          );
+          return;
         }
 
         handleDragEnd(event);
@@ -1064,7 +1171,9 @@ export function ProviderList({
       assignProvidersToExistingGroup,
       clearProviderGroupDragState,
       handleDragEnd,
+      providerGroups,
       refreshProviderViews,
+      reorderUngroupedProviderAroundGroup,
       resolveProviderGroupDropTarget,
       sortedProviders,
       t,
@@ -1084,6 +1193,72 @@ export function ProviderList({
       });
     },
     [],
+  );
+
+  const clearProviderSelectionSwipe = useCallback(() => {
+    providerSelectionSwipeRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    globalThis.addEventListener("pointerup", clearProviderSelectionSwipe);
+    globalThis.addEventListener("pointercancel", clearProviderSelectionSwipe);
+    return () => {
+      globalThis.removeEventListener("pointerup", clearProviderSelectionSwipe);
+      globalThis.removeEventListener(
+        "pointercancel",
+        clearProviderSelectionSwipe,
+      );
+    };
+  }, [clearProviderSelectionSwipe]);
+
+  useEffect(() => {
+    if (!isGroupManageMode) {
+      clearProviderSelectionSwipe();
+    }
+  }, [clearProviderSelectionSwipe, isGroupManageMode]);
+
+  const beginProviderSelectionSwipe = useCallback(
+    (
+      event: ReactPointerEvent<HTMLDivElement>,
+      providerId: string,
+      isSelected: boolean,
+    ) => {
+      if (event.button !== 0) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      const checked = !isSelected;
+      providerSelectionSwipeRef.current = { pointerId: event.pointerId, checked };
+      toggleProviderSelected(providerId, checked);
+    },
+    [toggleProviderSelected],
+  );
+
+  const extendProviderSelectionSwipe = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>, providerId: string) => {
+      const swipe = providerSelectionSwipeRef.current;
+      if (!swipe || swipe.pointerId !== event.pointerId) return;
+
+      toggleProviderSelected(providerId, swipe.checked);
+    },
+    [toggleProviderSelected],
+  );
+
+  const continueProviderSelectionSwipe = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const swipe = providerSelectionSwipeRef.current;
+      if (!swipe || swipe.pointerId !== event.pointerId) return;
+
+      const element = document.elementFromPoint(event.clientX, event.clientY);
+      const target = element?.closest<HTMLElement>(
+        "[data-provider-selection-id]",
+      );
+      const providerId = target?.dataset.providerSelectionId;
+      if (providerId) {
+        toggleProviderSelected(providerId, swipe.checked);
+      }
+    },
+    [toggleProviderSelected],
   );
 
   const allFilteredProvidersSelected =
@@ -1345,6 +1520,8 @@ export function ProviderList({
         onToggleSelected={(checked) =>
           toggleProviderSelected(provider.id, checked)
         }
+        onSelectionSwipeStart={beginProviderSelectionSwipe}
+        onSelectionSwipeEnter={extendProviderSelectionSwipe}
         groupMenu={renderProviderGroupMenu([provider], true)}
       />
     );
@@ -1361,14 +1538,17 @@ export function ProviderList({
     return (
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCenter}
+        collisionDetection={groupAwareCollisionDetection}
         onDragStart={handleProviderDragStart}
         onDragOver={handleProviderDragOver}
         onDragCancel={handleProviderDragCancel}
         onDragEnd={reorderProviderGroups}
       >
         <SortableContext items={sortableItems} strategy={verticalListSortingStrategy}>
-          <div className="space-y-3">
+          <div
+            className="space-y-3"
+            onPointerMove={continueProviderSelectionSwipe}
+          >
             {visibleProviderListItems.map((item) => {
               if (item.kind === "provider") {
                 return renderProviderCard(item.provider);
@@ -1559,6 +1739,7 @@ export function ProviderList({
                 </>
               )}
               <Button
+                data-testid="provider-group-manage-toggle"
                 variant={isGroupManageMode ? "secondary" : "outline"}
                 size="sm"
                 className="h-7 gap-1.5 px-2.5 text-xs"
@@ -1631,6 +1812,15 @@ interface SortableProviderCardProps {
   isGroupManageMode: boolean;
   isSelected: boolean;
   onToggleSelected: (checked: boolean) => void;
+  onSelectionSwipeStart: (
+    event: ReactPointerEvent<HTMLDivElement>,
+    providerId: string,
+    isSelected: boolean,
+  ) => void;
+  onSelectionSwipeEnter: (
+    event: ReactPointerEvent<HTMLDivElement>,
+    providerId: string,
+  ) => void;
   groupMenu: ReactNode;
 }
 
@@ -1674,6 +1864,9 @@ function SortableProviderGroup({
     transition,
     isDragging,
   } = useSortable({ id: `${PROVIDER_GROUP_DND_PREFIX}${group.id}` });
+  const { setNodeRef: setGroupDropNodeRef } = useDroppable({
+    id: `${PROVIDER_GROUP_DROP_DND_PREFIX}${group.id}`,
+  });
   const activeProviderUrl = activeProvider
     ? getProviderDisplayUrl(activeProvider)
     : undefined;
@@ -1700,7 +1893,7 @@ function SortableProviderGroup({
       style={style}
       data-testid={`provider-group-${group.id}`}
       className={cn(
-        "relative overflow-visible rounded-xl border border-cyan-300/70 bg-cyan-50/55 p-2.5 transition-all dark:border-cyan-900/70 dark:bg-cyan-950/20",
+        "relative overflow-visible rounded-xl border border-cyan-300/70 bg-cyan-50/55 p-0 transition-all dark:border-cyan-900/70 dark:bg-cyan-950/20",
         isDropTarget &&
           "border-primary bg-primary/10 shadow-md ring-2 ring-primary/30",
         isDragging && "z-10 scale-[1.01] border-primary shadow-lg",
@@ -1710,7 +1903,8 @@ function SortableProviderGroup({
         style={headerStyle}
         data-testid={`provider-group-header-${group.id}`}
         className={cn(
-          "sticky z-20 mb-3 flex items-center gap-2 rounded-lg border border-cyan-200/90 bg-cyan-50/95 px-2.5 py-2 shadow-sm backdrop-blur dark:border-cyan-900/80 dark:bg-cyan-950/95",
+          "sticky z-20 flex items-start gap-2 rounded-[0.7rem] border border-cyan-200/90 bg-cyan-50/95 px-3 py-2.5 shadow-sm backdrop-blur dark:border-cyan-900/80 dark:bg-cyan-950/95",
+          isExpanded && "mb-3",
           isDropTarget && "border-primary bg-primary/10",
         )}
       >
@@ -1728,9 +1922,14 @@ function SortableProviderGroup({
         >
           <GripVertical className="h-4 w-4" />
         </button>
+        <div
+          ref={setGroupDropNodeRef}
+          data-testid={`provider-group-drop-target-${group.id}`}
+          className="min-w-0 flex-1"
+        >
         <button
           type="button"
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          className="flex w-full min-w-0 items-center gap-2 text-left"
           onClick={onToggleExpanded}
         >
           <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -1742,8 +1941,11 @@ function SortableProviderGroup({
           </Badge>
         </button>
         {!isExpanded && activeProvider && (
-          <div className="flex min-w-0 max-w-[42%] flex-1 items-center gap-1.5 rounded-md border border-emerald-300/70 bg-emerald-100/80 px-2 py-1 text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/70 dark:text-emerald-200">
-            <Activity className="h-3.5 w-3.5 shrink-0" />
+          <div
+            data-testid={`provider-group-active-provider-${group.id}`}
+            className="mt-1.5 flex min-w-0 w-full items-start gap-1.5 rounded-md border border-emerald-300/70 bg-emerald-100/80 px-2.5 py-1.5 text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/70 dark:text-emerald-200"
+          >
+            <Activity className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <div className="min-w-0 flex-1 leading-tight">
               <div className="flex min-w-0 items-center gap-1.5">
                 <span className="shrink-0 text-[11px] font-medium">
@@ -1759,7 +1961,7 @@ function SortableProviderGroup({
                 <span
                   data-testid={`provider-group-active-url-${group.id}`}
                   title={activeProviderUrl}
-                  className="mt-0.5 block truncate text-[10px] text-emerald-700/85 dark:text-emerald-300/85"
+                  className="mt-0.5 block truncate text-[11px] text-emerald-700/85 dark:text-emerald-300/85"
                 >
                   {activeProviderUrl}
                 </span>
@@ -1767,6 +1969,8 @@ function SortableProviderGroup({
             </div>
           </div>
         )}
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-1">
         {modelTestSummary && (
           <div
             data-testid={`provider-group-model-test-summary-${group.id}`}
@@ -1874,9 +2078,10 @@ function SortableProviderGroup({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        </div>
       </div>
       {isExpanded && (
-        <div className="space-y-3 px-0.5 pb-0.5">{children}</div>
+        <div className="space-y-3 px-3 pb-3">{children}</div>
       )}
     </div>
   );
@@ -1916,6 +2121,8 @@ function SortableProviderCard({
   isGroupManageMode,
   isSelected,
   onToggleSelected,
+  onSelectionSwipeStart,
+  onSelectionSwipeEnter,
   groupMenu,
 }: SortableProviderCardProps) {
   const {
@@ -1933,9 +2140,27 @@ function SortableProviderCard({
   };
 
   return (
-    <div ref={setNodeRef} style={style} className="flex items-start gap-2">
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="flex items-start gap-2"
+      data-testid={`sortable-provider-card-${provider.id}`}
+      data-provider-selection-id={isGroupManageMode ? provider.id : undefined}
+      onPointerEnter={(event) => {
+        if (isGroupManageMode) {
+          onSelectionSwipeEnter(event, provider.id);
+        }
+      }}
+    >
       {isGroupManageMode && (
-        <div className="pt-5">
+        <div
+          data-testid={`provider-selection-control-${provider.id}`}
+          data-selected={isSelected ? "true" : "false"}
+          className="touch-none select-none pt-5"
+          onPointerDownCapture={(event) =>
+            onSelectionSwipeStart(event, provider.id, isSelected)
+          }
+        >
           <Checkbox
             checked={isSelected}
             aria-label="选择供应商"

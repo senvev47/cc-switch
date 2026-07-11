@@ -5,8 +5,16 @@ import type { ReactElement } from "react";
 import type { Provider } from "@/types";
 import { ProviderList } from "@/components/providers/ProviderList";
 
-const { modelTestProviderMock } = vi.hoisted(() => ({
+const {
+  modelTestProviderMock,
+  dndContextPropsSpy,
+  updateSortOrderMock,
+  updateTrayMenuMock,
+} = vi.hoisted(() => ({
   modelTestProviderMock: vi.fn(),
+  dndContextPropsSpy: vi.fn(),
+  updateSortOrderMock: vi.fn(),
+  updateTrayMenuMock: vi.fn(),
 }));
 const useDragSortMock = vi.fn();
 const useSortableMock = vi.fn();
@@ -15,6 +23,32 @@ const providerCardRenderSpy = vi.fn();
 vi.mock("@/hooks/useDragSort", () => ({
   useDragSort: (...args: unknown[]) => useDragSortMock(...args),
 }));
+
+vi.mock("@dnd-kit/core", async () => {
+  const actual = await vi.importActual<any>("@dnd-kit/core");
+
+  return {
+    ...actual,
+    DndContext: ({ children, ...props }: any) => {
+      dndContextPropsSpy(props);
+      return <div data-testid="provider-dnd-context">{children}</div>;
+    },
+    useDroppable: () => ({ setNodeRef: vi.fn() }),
+  };
+});
+
+vi.mock("@/lib/api/providers", async () => {
+  const actual = await vi.importActual<any>("@/lib/api/providers");
+
+  return {
+    ...actual,
+    providersApi: {
+      ...actual.providersApi,
+      updateSortOrder: updateSortOrderMock,
+      updateTrayMenu: updateTrayMenuMock,
+    },
+  };
+});
 
 vi.mock("@/components/providers/ProviderCard", () => ({
   ProviderCard: (props: any) => {
@@ -132,6 +166,11 @@ beforeEach(() => {
   useSortableMock.mockReset();
   modelTestProviderMock.mockReset();
   providerCardRenderSpy.mockClear();
+  dndContextPropsSpy.mockClear();
+  updateSortOrderMock.mockReset();
+  updateSortOrderMock.mockResolvedValue(undefined);
+  updateTrayMenuMock.mockReset();
+  updateTrayMenuMock.mockResolvedValue(undefined);
 
   useSortableMock.mockImplementation(({ id }: { id: string }) => ({
     setNodeRef: vi.fn(),
@@ -408,7 +447,7 @@ describe("ProviderList Component", () => {
     const header = screen.getByTestId("provider-group-header-group-team");
 
     expect(controls).toHaveClass("sticky", "top-0");
-    expect(group).toHaveClass("overflow-visible");
+    expect(group).toHaveClass("overflow-visible", "p-0");
     expect(group).not.toHaveAttribute("style");
     expect(header).toHaveClass("sticky");
     expect(header).toHaveStyle({ top: "8px" });
@@ -445,6 +484,11 @@ describe("ProviderList Component", () => {
       />,
     );
 
+    const activeProvider = screen.getByTestId(
+      "provider-group-active-provider-group-team",
+    );
+    expect(activeProvider).toHaveClass("w-full");
+    expect(activeProvider).not.toHaveClass("max-w-[42%]");
     expect(
       screen.getByTestId("provider-group-active-url-group-team"),
     ).toHaveTextContent("https://active.example.test/v1");
@@ -507,6 +551,130 @@ describe("ProviderList Component", () => {
     expect(
       group.compareDocumentPosition(afterCard) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).not.toBe(0);
+  });
+
+  it("selects providers while sweeping across cards in group management mode", () => {
+    const groupedProvider = createProvider({
+      id: "grouped",
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+    const first = createProvider({ id: "first" });
+    const second = createProvider({ id: "second" });
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [groupedProvider, first, second],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ grouped: groupedProvider, first, second }}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("provider-group-manage-toggle"));
+
+    const firstControl = screen.getByTestId(
+      "provider-selection-control-first",
+    );
+    const secondControl = screen.getByTestId(
+      "provider-selection-control-second",
+    );
+    fireEvent.pointerDown(firstControl, { button: 0, pointerId: 7 });
+    fireEvent.pointerEnter(screen.getByTestId("sortable-provider-card-second"), {
+      pointerId: 7,
+    });
+    fireEvent.pointerUp(window, { pointerId: 7 });
+
+    expect(firstControl).toHaveAttribute("data-selected", "true");
+    expect(secondControl).toHaveAttribute("data-selected", "true");
+  });
+
+  it("sorts an ungrouped provider before a group dropped on the group outer target", async () => {
+    const before = createProvider({ id: "before", sortIndex: 0 });
+    const groupedFirst = createProvider({
+      id: "grouped-first",
+      sortIndex: 1,
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+    const groupedSecond = createProvider({
+      id: "grouped-second",
+      sortIndex: 2,
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+    const after = createProvider({ id: "after", sortIndex: 3 });
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [before, groupedFirst, groupedSecond, after],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{
+          before,
+          "grouped-first": groupedFirst,
+          "grouped-second": groupedSecond,
+          after,
+        }}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    const dndContextProps = dndContextPropsSpy.mock.calls[
+      dndContextPropsSpy.mock.calls.length - 1
+    ][0] as { onDragEnd: (event: unknown) => Promise<void> };
+    await dndContextProps.onDragEnd({
+      active: {
+        id: "after",
+        rect: {
+          current: {
+            translated: { top: 80, height: 20 },
+          },
+        },
+      },
+      over: {
+        id: "provider-group:group-team",
+        rect: { top: 140, height: 80 },
+      },
+    });
+
+    expect(updateSortOrderMock).toHaveBeenCalledWith(
+      [
+        { id: "before", sortIndex: 0 },
+        { id: "after", sortIndex: 1 },
+        { id: "grouped-first", sortIndex: 2 },
+        { id: "grouped-second", sortIndex: 3 },
+      ],
+      "claude",
+    );
   });
 
   it("tests every provider in a group and renders the aggregate result", async () => {
