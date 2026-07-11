@@ -950,17 +950,9 @@ function App() {
           return <AgentsDefaultsPanel />;
         default:
           return (
-            <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden">
-              <div className="flex-1 overflow-y-auto overflow-x-hidden pb-12 px-1">
-                <AnimatePresence mode="wait">
-                  <motion.div
-                    key={activeApp}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.15 }}
-                    className="space-y-4"
-                  >
+            <div className="px-6">
+              <div className="px-1 pb-12">
+                <div key={activeApp} className="space-y-4">
                     <ProviderList
                       providers={providers}
                       currentProviderId={currentProviderId}
@@ -1009,13 +1001,18 @@ function App() {
                             : undefined
                       }
                     />
-                  </motion.div>
-                </AnimatePresence>
+                </div>
               </div>
             </div>
           );
       }
     })();
+
+    // Provider groups use native sticky positioning. Keep this view out of
+    // animated wrappers and give it the main content area's single scrollport.
+    if (currentView === "providers") {
+      return <div>{content}</div>;
+    }
 
     return (
       <AnimatePresence mode="wait">

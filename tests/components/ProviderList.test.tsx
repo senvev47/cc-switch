@@ -355,4 +355,52 @@ describe("ProviderList Component", () => {
     expect(groupedCardProps?.groupMenu).toBeTruthy();
     expect(ungroupedCardProps?.groupMenu).toBeTruthy();
   });
+
+  it("renders group controls and headers in sticky-safe containers", () => {
+    const groupedProvider = createProvider({
+      id: "grouped",
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [groupedProvider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+    useSortableMock.mockImplementation(({ id }: { id: string }) => ({
+      setNodeRef: vi.fn(),
+      attributes: { "data-dnd-id": id },
+      listeners: { onPointerDown: vi.fn() },
+      transform: { x: 0, y: 0, scaleX: 1, scaleY: 1 },
+      transition: "transform 150ms ease",
+      isDragging: false,
+    }));
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ grouped: groupedProvider }}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    const controls = screen.getByTestId("provider-group-controls");
+    const group = screen.getByTestId("provider-group-group-team");
+    const header = screen.getByTestId("provider-group-header-group-team");
+
+    expect(controls).toHaveClass("sticky", "top-0");
+    expect(group).toHaveClass("overflow-visible");
+    expect(group).not.toHaveAttribute("style");
+    expect(header).toHaveClass("sticky");
+    expect(header).toHaveStyle({ top: "8px" });
+  });
 });

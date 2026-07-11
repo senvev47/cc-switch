@@ -1345,6 +1345,7 @@ export function ProviderList({
       {providerGroups.length > 0 && (
         <div
           ref={groupControlsRef}
+          data-testid="provider-group-controls"
           className="sticky top-0 z-30 rounded-lg border border-cyan-300/70 bg-background/95 px-3 py-2.5 shadow-sm backdrop-blur dark:border-cyan-900/70"
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1506,18 +1507,29 @@ function SortableProviderGroup({
     isDragging,
   } = useSortable({ id: `${PROVIDER_GROUP_DND_PREFIX}${group.id}` });
 
-  const style: CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-  };
+  // A transformed ancestor can stop sticky descendants from following the
+  // provider scrollport in WebView. Only apply DnD positioning while needed.
+  const hasSortableTransform =
+    transform !== null &&
+    (transform.x !== 0 ||
+      transform.y !== 0 ||
+      transform.scaleX !== 1 ||
+      transform.scaleY !== 1);
+  const style: CSSProperties | undefined = hasSortableTransform
+    ? {
+        transform: CSS.Transform.toString(transform),
+        transition,
+      }
+    : undefined;
   const headerStyle: CSSProperties = { top: stickyTopOffset };
 
   return (
     <div
       ref={setNodeRef}
       style={style}
+      data-testid={`provider-group-${group.id}`}
       className={cn(
-        "relative rounded-xl border border-cyan-300/70 bg-cyan-50/55 p-2.5 transition-all dark:border-cyan-900/70 dark:bg-cyan-950/20",
+        "relative overflow-visible rounded-xl border border-cyan-300/70 bg-cyan-50/55 p-2.5 transition-all dark:border-cyan-900/70 dark:bg-cyan-950/20",
         isDropTarget &&
           "border-primary bg-primary/10 shadow-md ring-2 ring-primary/30",
         isDragging && "z-10 scale-[1.01] border-primary shadow-lg",
@@ -1525,6 +1537,7 @@ function SortableProviderGroup({
     >
       <div
         style={headerStyle}
+        data-testid={`provider-group-header-${group.id}`}
         className={cn(
           "sticky z-20 mb-3 flex items-center gap-2 rounded-lg border border-cyan-200/90 bg-cyan-50/95 px-2.5 py-2 shadow-sm backdrop-blur dark:border-cyan-900/80 dark:bg-cyan-950/95",
           isDropTarget && "border-primary bg-primary/10",
