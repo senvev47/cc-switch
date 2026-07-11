@@ -491,6 +491,18 @@ pub struct ProviderMeta {
         skip_serializing_if = "Option::is_none"
     )]
     pub local_proxy_request_overrides: Option<LocalProxyRequestOverrides>,
+    /// UI-only provider group identifier. Persisted with the provider metadata.
+    #[serde(rename = "providerGroupId", skip_serializing_if = "Option::is_none")]
+    pub provider_group_id: Option<String>,
+    /// UI-only provider group label. Stored with the identifier for display.
+    #[serde(rename = "providerGroupName", skip_serializing_if = "Option::is_none")]
+    pub provider_group_name: Option<String>,
+    /// Display order of the provider group in the provider list.
+    #[serde(
+        rename = "providerGroupSortIndex",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub provider_group_sort_index: Option<i64>,
     /// 累加模式应用中，该 provider 是否已写入 live config。
     /// `None` 表示旧数据/未知状态，`Some(false)` 表示明确仅存在于数据库中。
     #[serde(rename = "liveConfigManaged", skip_serializing_if = "Option::is_none")]
@@ -962,6 +974,27 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn provider_group_meta_round_trips_with_camel_case_fields() {
+        let meta = ProviderMeta {
+            provider_group_id: Some("group-team".to_string()),
+            provider_group_name: Some("Team".to_string()),
+            provider_group_sort_index: Some(2),
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_value(&meta).expect("serialize provider meta");
+        assert_eq!(serialized["providerGroupId"], "group-team");
+        assert_eq!(serialized["providerGroupName"], "Team");
+        assert_eq!(serialized["providerGroupSortIndex"], 2);
+
+        let decoded: ProviderMeta =
+            serde_json::from_value(serialized).expect("deserialize provider meta");
+        assert_eq!(decoded.provider_group_id.as_deref(), Some("group-team"));
+        assert_eq!(decoded.provider_group_name.as_deref(), Some("Team"));
+        assert_eq!(decoded.provider_group_sort_index, Some(2));
+    }
 
     #[test]
     fn provider_meta_serializes_pricing_model_source() {

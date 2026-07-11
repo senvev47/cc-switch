@@ -367,8 +367,6 @@ export function ProviderCard({
                 </span>
               )}
 
-              {groupMenu && <span className="shrink-0">{groupMenu}</span>}
-
               {isOmo && (
                 <span className="inline-flex items-center rounded-md bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
                   OMO
@@ -612,6 +610,7 @@ export function ProviderCard({
               // OpenClaw: default model
               isDefaultModel={isDefaultModel}
               onSetAsDefault={onSetAsDefault}
+              groupMenu={groupMenu}
             />
           </div>
         </div>

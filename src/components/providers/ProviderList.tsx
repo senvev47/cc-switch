@@ -543,6 +543,13 @@ export function ProviderList({
     });
   }, [providerGroups]);
 
+  useEffect(() => {
+    if (providerGroups.length > 0) return;
+
+    setIsGroupManageMode(false);
+    setSelectedProviderIds(new Set());
+  }, [providerGroups.length]);
+
   const selectedProviders = useMemo(
     () =>
       sortedProviders.filter((provider) => selectedProviderIds.has(provider.id)),
@@ -551,6 +558,10 @@ export function ProviderList({
 
   const refreshProviderViews = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
+    await queryClient.refetchQueries({
+      queryKey: ["providers", appId],
+      type: "active",
+    });
     await queryClient.invalidateQueries({ queryKey: ["failoverQueue", appId] });
     try {
       await providersApi.updateTrayMenu();
@@ -871,17 +882,28 @@ export function ProviderList({
     );
   }
 
-  const renderProviderGroupMenu = (targets: Provider[]) => (
+  const renderProviderGroupMenu = (
+    targets: Provider[],
+    compact = false,
+  ) => (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          variant="secondary"
-          size="sm"
-          className="h-7 gap-1.5 px-2.5 text-xs"
+          variant={compact ? "ghost" : "secondary"}
+          size={compact ? "icon" : "sm"}
+          className={
+            compact ? "h-8 w-8 p-1" : "h-7 gap-1.5 px-2.5 text-xs"
+          }
           disabled={targets.length === 0}
+          title={
+            compact
+              ? t("provider.joinGroup", { defaultValue: "加入分组" })
+              : undefined
+          }
+          aria-label={t("provider.joinGroup", { defaultValue: "加入分组" })}
         >
-          <FolderPlus className="h-3.5 w-3.5" />
-          {t("provider.joinGroup", { defaultValue: "加入分组" })}
+          <FolderPlus className="h-4 w-4" />
+          {!compact && t("provider.joinGroup", { defaultValue: "加入分组" })}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-52">
@@ -972,7 +994,7 @@ export function ProviderList({
         onToggleSelected={(checked) =>
           toggleProviderSelected(provider.id, checked)
         }
-        groupMenu={renderProviderGroupMenu([provider])}
+        groupMenu={renderProviderGroupMenu([provider], true)}
       />
     );
   };
@@ -1128,76 +1150,82 @@ export function ProviderList({
         )}
       </AnimatePresence>
 
-      <div className="rounded-lg border bg-muted/30 px-3 py-2.5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2 text-sm">
-            <Folder className="h-4 w-4 text-muted-foreground" />
-            <span className="font-medium">
-              {t("provider.groupManage", { defaultValue: "供应商分组" })}
-            </span>
-            <Badge variant="secondary" className="text-xs">
-              {providerGroups.length}
-            </Badge>
-            {isGroupManageMode && (
-              <span className="text-xs text-muted-foreground">
-                {t("provider.groupSelectedCount", {
-                  defaultValue: "已选 {{count}} 个",
-                  count: selectedProviders.length,
-                })}
+      {providerGroups.length > 0 && (
+        <div className="rounded-lg border bg-muted/30 px-3 py-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2 text-sm">
+              <Folder className="h-4 w-4 text-muted-foreground" />
+              <span className="font-medium">
+                {t("provider.groupManage", { defaultValue: "供应商分组" })}
               </span>
-            )}
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {isGroupManageMode && (
-              <>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2.5 text-xs"
-                  onClick={toggleAllFilteredProviders}
-                >
-                  {allFilteredProvidersSelected
-                    ? t("provider.clearFilteredSelection", {
-                        defaultValue: "取消全选",
-                      })
-                    : t("provider.selectAllFiltered", {
-                        defaultValue: "全选当前",
-                      })}
-                </Button>
-                {renderProviderGroupMenu(selectedProviders)}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 gap-1.5 px-2.5 text-xs"
-                  disabled={selectedProviders.length === 0}
-                  onClick={() => void clearProvidersGroup(selectedProviders)}
-                >
-                  <Ungroup className="h-3.5 w-3.5" />
-                  {t("provider.clearGroup", { defaultValue: "取消分组" })}
-                </Button>
-              </>
-            )}
-            <Button
-              variant={isGroupManageMode ? "secondary" : "outline"}
-              size="sm"
-              className="h-7 gap-1.5 px-2.5 text-xs"
-              onClick={() => {
-                if (isGroupManageMode) {
-                  setSelectedProviderIds(new Set());
-                }
-                setIsGroupManageMode((current) => !current);
-              }}
-            >
-              <CheckSquare className="h-3.5 w-3.5" />
-              {isGroupManageMode
-                ? t("provider.exitGroupManage", { defaultValue: "退出分组管理" })
-                : t("provider.enterGroupManage", {
-                    defaultValue: "分组管理",
+              <Badge variant="secondary" className="text-xs">
+                {providerGroups.length}
+              </Badge>
+              {isGroupManageMode && (
+                <span className="text-xs text-muted-foreground">
+                  {t("provider.groupSelectedCount", {
+                    defaultValue: "已选 {{count}} 个",
+                    count: selectedProviders.length,
                   })}
-            </Button>
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {isGroupManageMode && (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2.5 text-xs"
+                    onClick={toggleAllFilteredProviders}
+                  >
+                    {allFilteredProvidersSelected
+                      ? t("provider.clearFilteredSelection", {
+                          defaultValue: "取消全选",
+                        })
+                      : t("provider.selectAllFiltered", {
+                          defaultValue: "全选当前",
+                        })}
+                  </Button>
+                  {renderProviderGroupMenu(selectedProviders)}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 gap-1.5 px-2.5 text-xs"
+                    disabled={selectedProviders.length === 0}
+                    onClick={() => void clearProvidersGroup(selectedProviders)}
+                  >
+                    <Ungroup className="h-3.5 w-3.5" />
+                    {t("provider.clearGroup", {
+                      defaultValue: "取消分组",
+                    })}
+                  </Button>
+                </>
+              )}
+              <Button
+                variant={isGroupManageMode ? "secondary" : "outline"}
+                size="sm"
+                className="h-7 gap-1.5 px-2.5 text-xs"
+                onClick={() => {
+                  if (isGroupManageMode) {
+                    setSelectedProviderIds(new Set());
+                  }
+                  setIsGroupManageMode((current) => !current);
+                }}
+              >
+                <CheckSquare className="h-3.5 w-3.5" />
+                {isGroupManageMode
+                  ? t("provider.exitGroupManage", {
+                      defaultValue: "退出分组管理",
+                    })
+                  : t("provider.enterGroupManage", {
+                      defaultValue: "分组管理",
+                    })}
+              </Button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {filteredProviders.length === 0 ? (
         <div className="px-6 py-8 text-sm text-center border border-dashed rounded-lg border-border text-muted-foreground">
