@@ -8,11 +8,13 @@ import { ProviderList } from "@/components/providers/ProviderList";
 const {
   modelTestProviderMock,
   dndContextPropsSpy,
+  updateProviderMock,
   updateSortOrderMock,
   updateTrayMenuMock,
 } = vi.hoisted(() => ({
   modelTestProviderMock: vi.fn(),
   dndContextPropsSpy: vi.fn(),
+  updateProviderMock: vi.fn(),
   updateSortOrderMock: vi.fn(),
   updateTrayMenuMock: vi.fn(),
 }));
@@ -44,6 +46,7 @@ vi.mock("@/lib/api/providers", async () => {
     ...actual,
     providersApi: {
       ...actual.providersApi,
+      update: updateProviderMock,
       updateSortOrder: updateSortOrderMock,
       updateTrayMenu: updateTrayMenuMock,
     },
@@ -167,6 +170,8 @@ beforeEach(() => {
   modelTestProviderMock.mockReset();
   providerCardRenderSpy.mockClear();
   dndContextPropsSpy.mockClear();
+  updateProviderMock.mockReset();
+  updateProviderMock.mockResolvedValue(undefined);
   updateSortOrderMock.mockReset();
   updateSortOrderMock.mockResolvedValue(undefined);
   updateTrayMenuMock.mockReset();
@@ -673,6 +678,67 @@ describe("ProviderList Component", () => {
         { id: "grouped-first", sortIndex: 2 },
         { id: "grouped-second", sortIndex: 3 },
       ],
+      "claude",
+    );
+  });
+
+  it("adds an ungrouped provider dropped in the middle of a group member card", async () => {
+    const groupedProvider = createProvider({
+      id: "grouped",
+      meta: {
+        providerGroupId: "group-team",
+        providerGroupName: "Team",
+        providerGroupSortIndex: 0,
+      },
+    });
+    const ungroupedProvider = createProvider({ id: "ungrouped" });
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [groupedProvider, ungroupedProvider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ grouped: groupedProvider, ungrouped: ungroupedProvider }}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    const dndContextProps = dndContextPropsSpy.mock.calls[
+      dndContextPropsSpy.mock.calls.length - 1
+    ][0] as { onDragEnd: (event: unknown) => Promise<void> };
+    await dndContextProps.onDragEnd({
+      active: {
+        id: "ungrouped",
+        rect: {
+          current: {
+            translated: { top: 130, height: 20 },
+          },
+        },
+      },
+      over: {
+        id: "grouped",
+        rect: { top: 100, height: 80 },
+      },
+    });
+
+    expect(updateProviderMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "ungrouped",
+        meta: {
+          providerGroupId: "group-team",
+          providerGroupName: "Team",
+          providerGroupSortIndex: 0,
+        },
+      }),
       "claude",
     );
   });

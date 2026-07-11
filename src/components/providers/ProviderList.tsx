@@ -128,6 +128,18 @@ interface ProviderSelectionSwipe {
   checked: boolean;
 }
 
+const isWithinGroupMemberDropZone = (
+  activeRect: Pick<ClientRect, "top" | "height"> | null,
+  overRect: Pick<ClientRect, "top" | "height"> | null,
+) => {
+  if (!activeRect || !overRect) return true;
+
+  const activeCenter = activeRect.top + activeRect.height / 2;
+  const middleStart = overRect.top + overRect.height * 0.25;
+  const middleEnd = overRect.top + overRect.height * 0.75;
+  return activeCenter > middleStart && activeCenter < middleEnd;
+};
+
 type ProviderListItem =
   | {
       kind: "group";
@@ -885,17 +897,32 @@ export function ProviderList({
   );
 
   const resolveProviderGroupDropTarget = useCallback(
-    (dropTargetId: string): ProviderGroupView | undefined => {
-      if (!dropTargetId.startsWith(PROVIDER_GROUP_DROP_DND_PREFIX)) {
-        return undefined;
+    (
+      dropTargetId: string,
+      allowGroupMemberDrop = false,
+    ): ProviderGroupView | undefined => {
+      if (dropTargetId.startsWith(PROVIDER_GROUP_DROP_DND_PREFIX)) {
+        const groupId = dropTargetId.slice(
+          PROVIDER_GROUP_DROP_DND_PREFIX.length,
+        );
+        return providerGroups.find((group) => group.id === groupId);
       }
 
-      const groupId = dropTargetId.slice(
-        PROVIDER_GROUP_DROP_DND_PREFIX.length,
+      if (!allowGroupMemberDrop) return undefined;
+
+      const overProvider = sortedProviders.find(
+        (provider) => provider.id === dropTargetId,
       );
-      return providerGroups.find((group) => group.id === groupId);
+      const overProviderGroup = overProvider
+        ? getProviderGroup(overProvider)
+        : null;
+      if (!overProviderGroup) return undefined;
+
+      return providerGroups.find(
+        (group) => group.id === overProviderGroup.id,
+      );
     },
-    [providerGroups],
+    [providerGroups, sortedProviders],
   );
 
   const clearProviderGroupDragState = useCallback(() => {
@@ -927,7 +954,13 @@ export function ProviderList({
         return;
       }
 
-      const targetGroup = resolveProviderGroupDropTarget(String(event.over.id));
+      const targetGroup = resolveProviderGroupDropTarget(
+        String(event.over.id),
+        isWithinGroupMemberDropZone(
+          event.active.rect.current.translated,
+          event.over.rect,
+        ),
+      );
       const sourceGroup = getProviderGroup(provider);
       const nextTargetId =
         targetGroup && targetGroup.id !== sourceGroup?.id
@@ -1088,7 +1121,13 @@ export function ProviderList({
         const activeProvider = sortedProviders.find(
           (provider) => provider.id === activeId,
         );
-        const targetGroup = resolveProviderGroupDropTarget(overId);
+        const targetGroup = resolveProviderGroupDropTarget(
+          overId,
+          isWithinGroupMemberDropZone(
+            active.rect.current.translated,
+            over.rect,
+          ),
+        );
 
         if (activeProvider && targetGroup) {
           const activeProviderGroup = getProviderGroup(activeProvider);
