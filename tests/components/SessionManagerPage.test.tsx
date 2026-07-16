@@ -252,6 +252,61 @@ describe("SessionManagerPage", () => {
     expect(toastSuccessMock).toHaveBeenCalled();
   });
 
+  it("keeps persisted pins while the session list is still loading", async () => {
+    const pinnedSession: SessionMeta = {
+      providerId: "codex",
+      sessionId: "pinned-session",
+      title: "Pinned Session",
+      summary: "Pinned summary",
+      projectDir: "/mock/codex",
+      createdAt: 1,
+      lastActiveAt: 1,
+      sourcePath: "/mock/codex/pinned.jsonl",
+      resumeCommand: "codex resume pinned-session",
+    };
+    const pinnedKey = "codex:pinned-session:/mock/codex/pinned.jsonl";
+    let resolveSessions: ((sessions: SessionMeta[]) => void) | undefined;
+    const listSpy = vi
+      .spyOn(sessionsApi, "list")
+      .mockImplementation(
+        () =>
+          new Promise<SessionMeta[]>((resolve) => {
+            resolveSessions = resolve;
+          }),
+      );
+
+    window.localStorage.setItem(
+      PINNED_SESSIONS_STORAGE_KEY,
+      JSON.stringify([pinnedKey]),
+    );
+
+    renderPage();
+
+    await waitFor(() => expect(resolveSessions).toBeDefined());
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(PINNED_SESSIONS_STORAGE_KEY) ?? "[]",
+      ),
+    ).toEqual([pinnedKey]);
+
+    await act(async () => {
+      resolveSessions?.([pinnedSession]);
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Pinned Session" }),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(PINNED_SESSIONS_STORAGE_KEY) ?? "[]",
+      ),
+    ).toEqual([pinnedKey]);
+
+    listSpy.mockRestore();
+  });
+
   it("removes a deleted session from filtered search results", async () => {
     renderPage();
 

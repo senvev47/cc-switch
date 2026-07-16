@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch"
-version = "3.16.5"
+version = "3.17.0"
 description = "Unofficial CC Switch fork with proxy watchdog GUI and restored model test action"
 authors = ["Jason Young"]
 license = "MIT"

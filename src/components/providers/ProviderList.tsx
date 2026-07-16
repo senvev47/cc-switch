@@ -88,7 +88,7 @@ import { isTextEditableTarget } from "@/utils/domUtils";
 import {
   modelTestProvider,
   type StreamCheckResult,
-} from "@/lib/api/model-test";
+} from "@/lib/api/connectivity-check";
 import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
 
 interface ProviderListProps {

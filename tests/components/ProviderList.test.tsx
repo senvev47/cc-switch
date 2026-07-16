@@ -129,7 +129,7 @@ vi.mock("@/hooks/useStreamCheck", () => ({
   }),
 }));
 
-vi.mock("@/lib/api/model-test", () => ({
+vi.mock("@/lib/api/connectivity-check", () => ({
   modelTestProvider: modelTestProviderMock,
 }));
 

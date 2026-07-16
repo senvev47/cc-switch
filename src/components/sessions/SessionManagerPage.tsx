@@ -332,6 +332,8 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   }, [isLoading, validGroupExpansionKeys]);
 
   useEffect(() => {
+    if (isLoading) return;
+
     const validKeys = new Set(sessions.map((session) => getSessionKey(session)));
     setPinnedSessionKeys((current) => {
       let changed = false;
@@ -345,7 +347,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
       });
       return changed ? next : current;
     });
-  }, [sessions]);
+  }, [isLoading, sessions]);
 
   useEffect(() => {
     if (orderedFilteredSessions.length === 0) {
