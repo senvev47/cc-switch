@@ -210,7 +210,7 @@ const filterSetToAllowedValues = (
 export function SessionManagerPage({ appId }: { appId: string }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const { data, isLoading, isSuccess, refetch } = useSessionsQuery();
+  const { data, isLoading, refetch } = useSessionsQuery();
   const sessions = data ?? [];
   const detailRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);

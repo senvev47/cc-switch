@@ -296,8 +296,7 @@ impl RequestForwarder {
         let is_provider_error = match &retry_err {
             ProxyError::Timeout(_) | ProxyError::ForwardFailed(_) => true,
             ProxyError::UpstreamError { status, .. } => {
-                *status >= 500
-                    || should_fail_over_upstream_4xx(&retry_err, has_failover_candidates)
+                *status >= 500 || should_fail_over_upstream_4xx(&retry_err, has_failover_candidates)
             }
             _ => false,
         };
@@ -2709,10 +2708,7 @@ impl RequestForwarder {
 /// mapping, quota, auth key, or vendor request validation). Only a selected
 /// failover queue has another provider to try; locally generated request errors
 /// never reach this branch.
-fn should_fail_over_upstream_4xx(
-    error: &ProxyError,
-    has_failover_candidates: bool,
-) -> bool {
+fn should_fail_over_upstream_4xx(error: &ProxyError, has_failover_candidates: bool) -> bool {
     has_failover_candidates
         && matches!(
             error,

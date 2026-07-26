@@ -48,8 +48,7 @@ fn merge_settings_for_save(
     // 开关）后、前端 query 缓存刷新前的一次全量保存会把旧 marker 重放回来，
     // 重新开启时被"复活"的标记挡住而漏迁。
     if incoming.session_manager_pinned_sessions.is_none() {
-        incoming.session_manager_pinned_sessions =
-            existing.session_manager_pinned_sessions.clone();
+        incoming.session_manager_pinned_sessions = existing.session_manager_pinned_sessions.clone();
     }
     incoming.local_migrations = existing.local_migrations.clone();
     incoming
