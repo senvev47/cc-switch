@@ -30,7 +30,7 @@ import {
   useSessionMessagesQuery,
   useSessionsQuery,
 } from "@/lib/query";
-import { sessionsApi } from "@/lib/api";
+import { sessionsApi, settingsApi } from "@/lib/api";
 import type { SessionMeta } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -87,6 +87,7 @@ const PINNED_SESSIONS_STORAGE_KEY = "cc-switch.sessionManager.pinnedSessions";
 type ProviderFilter =
   | "all"
   | "codex"
+  | "grokbuild"
   | "claude"
   | "opencode"
   | "openclaw"
@@ -113,15 +114,16 @@ const readInitialPinnedSessionKeys = (): Set<string> => {
   try {
     const stored = window.localStorage.getItem(PINNED_SESSIONS_STORAGE_KEY);
     const parsed = stored ? JSON.parse(stored) : [];
-    return new Set(
-      Array.isArray(parsed)
-        ? parsed.filter((value): value is string => typeof value === "string")
-        : [],
-    );
+    return new Set(normalizePinnedSessionKeys(parsed));
   } catch {
     return new Set();
   }
 };
+
+const normalizePinnedSessionKeys = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 
 const readInitialSessionListViewMode = (): SessionListViewMode => {
   if (typeof window === "undefined") return "flat";
@@ -228,6 +230,10 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   const [pinnedSessionKeys, setPinnedSessionKeys] = useState<Set<string>>(
     readInitialPinnedSessionKeys,
   );
+  const [pinnedSettingsHydrated, setPinnedSettingsHydrated] = useState(false);
+  const pinnedSettingsPersistQueueRef = useRef<Promise<void>>(
+    Promise.resolve(),
+  );
   const [cleanupMaxMessages, setCleanupMaxMessages] = useState(20);
   const [includePinnedInCleanup, setIncludePinnedInCleanup] = useState(false);
   const [cleanupTargets, setCleanupTargets] = useState<SessionMeta[] | null>(
@@ -314,11 +320,62 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   }, [expandedDirectoryGroups, expandedProviderGroups]);
 
   useEffect(() => {
-    window.localStorage.setItem(
-      PINNED_SESSIONS_STORAGE_KEY,
-      JSON.stringify(Array.from(pinnedSessionKeys).sort()),
-    );
-  }, [pinnedSessionKeys]);
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const settings = await settingsApi.get();
+        if (cancelled) return;
+
+        const settingsKeys = normalizePinnedSessionKeys(
+          settings.sessionManagerPinnedSessions,
+        );
+        const localKeys = Array.from(readInitialPinnedSessionKeys());
+        setPinnedSessionKeys(new Set([...settingsKeys, ...localKeys]));
+      } catch (error) {
+        console.warn("Failed to load pinned session settings", error);
+      } finally {
+        if (!cancelled) {
+          setPinnedSettingsHydrated(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const persistPinnedSessionKeys = useCallback(
+    (keys: Set<string>) => {
+      const serializedKeys = Array.from(keys).sort();
+      window.localStorage.setItem(
+        PINNED_SESSIONS_STORAGE_KEY,
+        JSON.stringify(serializedKeys),
+      );
+
+      if (!pinnedSettingsHydrated) return;
+
+      pinnedSettingsPersistQueueRef.current =
+        pinnedSettingsPersistQueueRef.current
+          .catch(() => undefined)
+          .then(async () => {
+            const settings = await settingsApi.get();
+            await settingsApi.save({
+              ...settings,
+              sessionManagerPinnedSessions: serializedKeys,
+            });
+          })
+          .catch((error) => {
+            console.warn("Failed to save pinned session settings", error);
+          });
+    },
+    [pinnedSettingsHydrated],
+  );
+
+  useEffect(() => {
+    persistPinnedSessionKeys(pinnedSessionKeys);
+  }, [persistPinnedSessionKeys, pinnedSessionKeys]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -330,24 +387,6 @@ export function SessionManagerPage({ appId }: { appId: string }) {
       filterSetToAllowedValues(current, validGroupExpansionKeys.directoryKeys),
     );
   }, [isLoading, validGroupExpansionKeys]);
-
-  useEffect(() => {
-    if (isLoading || !isSuccess || sessions.length === 0) return;
-
-    const validKeys = new Set(sessions.map((session) => getSessionKey(session)));
-    setPinnedSessionKeys((current) => {
-      let changed = false;
-      const next = new Set<string>();
-      current.forEach((key) => {
-        if (validKeys.has(key)) {
-          next.add(key);
-        } else {
-          changed = true;
-        }
-      });
-      return changed ? next : current;
-    });
-  }, [isLoading, isSuccess, sessions]);
 
   useEffect(() => {
     if (orderedFilteredSessions.length === 0) {
@@ -709,7 +748,10 @@ export function SessionManagerPage({ appId }: { appId: string }) {
     const threshold = Math.max(0, Math.floor(cleanupMaxMessages));
     const candidates = orderedFilteredSessions.filter((session) => {
       if (!session.sourcePath) return false;
-      if (!includePinnedInCleanup && pinnedSessionKeys.has(getSessionKey(session))) {
+      if (
+        !includePinnedInCleanup &&
+        pinnedSessionKeys.has(getSessionKey(session))
+      ) {
         return false;
       }
       return true;
@@ -1223,6 +1265,16 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                                 <span>Codex</span>
                               </div>
                             </SelectItem>
+                            <SelectItem value="grokbuild">
+                              <div className="flex items-center gap-2">
+                                <ProviderIcon
+                                  icon="grok"
+                                  name="grokbuild"
+                                  size={14}
+                                />
+                                <span>Grok Build</span>
+                              </div>
+                            </SelectItem>
                             <SelectItem value="claude">
                               <div className="flex items-center gap-2">
                                 <ProviderIcon
@@ -1282,17 +1334,19 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
-                            variant="ghost"
-                            size="icon"
-                            className="size-7"
-                            onClick={() =>
-                              selectedSession &&
-                              toggleSessionPinned(selectedSession)
-                            }
+                              variant="ghost"
+                              size="icon"
+                              className="size-7"
+                              onClick={() =>
+                                selectedSession &&
+                                toggleSessionPinned(selectedSession)
+                              }
                               disabled={!selectedSession}
                             >
                               {selectedSession &&
-                              pinnedSessionKeys.has(getSessionKey(selectedSession)) ? (
+                              pinnedSessionKeys.has(
+                                getSessionKey(selectedSession),
+                              ) ? (
                                 <PinOff className="size-3.5" />
                               ) : (
                                 <Pin className="size-3.5" />
@@ -1301,7 +1355,9 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                           </TooltipTrigger>
                           <TooltipContent>
                             {selectedSession &&
-                            pinnedSessionKeys.has(getSessionKey(selectedSession))
+                            pinnedSessionKeys.has(
+                              getSessionKey(selectedSession),
+                            )
                               ? t("sessionManager.unpinSession", {
                                   defaultValue: "取消置顶",
                                 })
@@ -1758,7 +1814,9 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                               size="sm"
                               variant="outline"
                               className="gap-1.5"
-                              onClick={() => toggleSessionPinned(selectedSession)}
+                              onClick={() =>
+                                toggleSessionPinned(selectedSession)
+                              }
                             >
                               {pinnedSessionKeys.has(
                                 getSessionKey(selectedSession),
@@ -1781,7 +1839,9 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                             </Button>
                           </TooltipTrigger>
                           <TooltipContent>
-                            {pinnedSessionKeys.has(getSessionKey(selectedSession))
+                            {pinnedSessionKeys.has(
+                              getSessionKey(selectedSession),
+                            )
                               ? t("sessionManager.unpinSession", {
                                   defaultValue: "取消置顶",
                                 })

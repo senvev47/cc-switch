@@ -50,6 +50,7 @@ import type { Provider } from "@/types";
 import type { AppId } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { providersApi } from "@/lib/api/providers";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import { useDragSort } from "@/hooks/useDragSort";
 import {
   useOpenClawLiveProviderIds,
@@ -202,9 +203,7 @@ const buildProviderListItems = (
 
   orderedProviders.forEach((provider) => {
     const providerGroup = getProviderGroup(provider);
-    const group = providerGroup
-      ? groupsById.get(providerGroup.id)
-      : undefined;
+    const group = providerGroup ? groupsById.get(providerGroup.id) : undefined;
 
     if (group) {
       if (!emittedGroupIds.has(group.id)) {
@@ -285,9 +284,7 @@ export function ProviderList({
   const [providerGroupDropTargetId, setProviderGroupDropTargetId] = useState<
     string | null
   >(null);
-  const providerSelectionSwipeRef = useRef<ProviderSelectionSwipe | null>(
-    null,
-  );
+  const providerSelectionSwipeRef = useRef<ProviderSelectionSwipe | null>(null);
   const groupControlsRef = useRef<HTMLDivElement>(null);
   const [groupControlsHeight, setGroupControlsHeight] = useState(0);
 
@@ -667,9 +664,7 @@ export function ProviderList({
           );
         }
       } finally {
-        setGroupTestingId((current) =>
-          current === group.id ? null : current,
-        );
+        setGroupTestingId((current) => (current === group.id ? null : current));
       }
     },
     [appId, groupTestingId, t],
@@ -707,8 +702,13 @@ export function ProviderList({
         toast.info(t("provider.noProviders"));
       }
     },
-    onError: (error: Error) => {
-      toast.error(error.message);
+    onError: (error: unknown) => {
+      // Tauri invoke 的 reject 值是后端序列化出的纯字符串而非 Error 对象，
+      // 取 .message 只会得到 undefined（空 toast）。
+      toast.error(extractErrorMessage(error) || t("settings.importFailed"));
+      // 导入失败前也可能已产生需要上屏的副作用：GrokBuild 官方登录态下点
+      // 导入，命令层会先补种官方条目、随后才因 live 不可导入而报错。
+      queryClient.invalidateQueries({ queryKey: ["providers", appId] });
     },
   });
 
@@ -824,10 +824,7 @@ export function ProviderList({
 
   const visibleProviderListItems = useMemo(
     () =>
-      buildProviderListItems(
-        filteredProviders,
-        filteredProviderGroups.groups,
-      ),
+      buildProviderListItems(filteredProviders, filteredProviderGroups.groups),
     [filteredProviderGroups.groups, filteredProviders],
   );
 
@@ -897,7 +894,9 @@ export function ProviderList({
 
   const selectedProviders = useMemo(
     () =>
-      sortedProviders.filter((provider) => selectedProviderIds.has(provider.id)),
+      sortedProviders.filter((provider) =>
+        selectedProviderIds.has(provider.id),
+      ),
     [selectedProviderIds, sortedProviders],
   );
 
@@ -911,7 +910,10 @@ export function ProviderList({
     try {
       await providersApi.updateTrayMenu();
     } catch (error) {
-      console.error("Failed to update tray menu after provider grouping", error);
+      console.error(
+        "Failed to update tray menu after provider grouping",
+        error,
+      );
     }
   }, [appId, queryClient]);
 
@@ -1036,9 +1038,7 @@ export function ProviderList({
         : null;
       if (!overProviderGroup) return undefined;
 
-      return providerGroups.find(
-        (group) => group.id === overProviderGroup.id,
-      );
+      return providerGroups.find((group) => group.id === overProviderGroup.id);
     },
     [providerGroups, sortedProviders],
   );
@@ -1210,8 +1210,7 @@ export function ProviderList({
         (item) => item.id !== activeItem.id,
       );
       const targetIndex = itemsWithoutActiveProvider.findIndex(
-        (item) =>
-          item.kind === "group" && item.group.id === targetGroup.id,
+        (item) => item.kind === "group" && item.group.id === targetGroup.id,
       );
       if (targetIndex === -1) return;
 
@@ -1258,11 +1257,14 @@ export function ProviderList({
         const rootTargetGroup = overId.startsWith(PROVIDER_GROUP_DND_PREFIX)
           ? providerGroups.find(
               (group) =>
-                group.id ===
-                overId.slice(PROVIDER_GROUP_DND_PREFIX.length),
+                group.id === overId.slice(PROVIDER_GROUP_DND_PREFIX.length),
             )
           : undefined;
-        if (activeProvider && !getProviderGroup(activeProvider) && rootTargetGroup) {
+        if (
+          activeProvider &&
+          !getProviderGroup(activeProvider) &&
+          rootTargetGroup
+        ) {
           const activeRect = active.rect.current.translated;
           const placement =
             activeRect &&
@@ -1386,7 +1388,10 @@ export function ProviderList({
       event.stopPropagation();
       event.currentTarget.setPointerCapture?.(event.pointerId);
       const checked = !isSelected;
-      providerSelectionSwipeRef.current = { pointerId: event.pointerId, checked };
+      providerSelectionSwipeRef.current = {
+        pointerId: event.pointerId,
+        checked,
+      };
       toggleProviderSelected(providerId, checked);
     },
     [toggleProviderSelected],
@@ -1547,10 +1552,7 @@ export function ProviderList({
     );
   }
 
-  const renderProviderGroupMenu = (
-    targets: Provider[],
-    compact = false,
-  ) => {
+  const renderProviderGroupMenu = (targets: Provider[], compact = false) => {
     const canClearGroup = targets.some((provider) =>
       Boolean(getProviderGroup(provider)),
     );
@@ -1561,9 +1563,7 @@ export function ProviderList({
           <Button
             variant={compact ? "ghost" : "secondary"}
             size={compact ? "icon" : "sm"}
-            className={
-              compact ? "h-8 w-8 p-1" : "h-7 gap-1.5 px-2.5 text-xs"
-            }
+            className={compact ? "h-8 w-8 p-1" : "h-7 gap-1.5 px-2.5 text-xs"}
             disabled={targets.length === 0}
             title={
               compact
@@ -1575,8 +1575,7 @@ export function ProviderList({
             })}
           >
             <FolderPlus className="h-4 w-4" />
-            {!compact &&
-              t("provider.joinGroup", { defaultValue: "加入分组" })}
+            {!compact && t("provider.joinGroup", { defaultValue: "加入分组" })}
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-52">
@@ -1663,7 +1662,9 @@ export function ProviderList({
         isAutoFailoverEnabled={isFailoverModeActive}
         failoverPriority={getFailoverPriority(provider.id)}
         isInFailoverQueue={isInFailoverQueue(provider.id)}
-        onToggleFailover={(enabled) => handleToggleFailover(provider.id, enabled)}
+        onToggleFailover={(enabled) =>
+          handleToggleFailover(provider.id, enabled)
+        }
         activeProviderId={activeProviderId}
         isDefaultModel={
           appId === "hermes"
@@ -1702,7 +1703,10 @@ export function ProviderList({
         onDragCancel={handleProviderDragCancel}
         onDragEnd={reorderProviderGroups}
       >
-        <SortableContext items={sortableItems} strategy={verticalListSortingStrategy}>
+        <SortableContext
+          items={sortableItems}
+          strategy={verticalListSortingStrategy}
+        >
           <div
             className="space-y-3"
             onPointerMove={continueProviderSelectionSwipe}
@@ -1738,9 +1742,7 @@ export function ProviderList({
                   canRemoveFromFailoverQueue={group.providers.some((provider) =>
                     failoverQueueProviderIds.has(provider.id),
                   )}
-                  isFailoverActionRunning={
-                    groupFailoverActionId === group.id
-                  }
+                  isFailoverActionRunning={groupFailoverActionId === group.id}
                   onToggleExpanded={() => {
                     setExpandedProviderGroupIds((current) => {
                       const next = new Set(current);
@@ -1753,7 +1755,9 @@ export function ProviderList({
                     });
                   }}
                   onDeleteGroup={() => void deleteProviderGroup(fullGroup)}
-                  onClearGroup={() => void clearProvidersGroup(fullGroup.providers)}
+                  onClearGroup={() =>
+                    void clearProvidersGroup(fullGroup.providers)
+                  }
                   onTestModels={() => void handleTestGroupModels(fullGroup)}
                   onAddToFailoverQueue={() =>
                     void addGroupToFailoverQueue(fullGroup)
@@ -1768,7 +1772,6 @@ export function ProviderList({
                 </SortableProviderGroup>
               );
             })}
-
           </div>
         </SortableContext>
       </DndContext>
@@ -2113,198 +2116,196 @@ function SortableProviderGroup({
           data-testid={`provider-group-drop-target-${group.id}`}
           className="min-w-0 flex-1"
         >
-        <button
-          type="button"
-          className="flex w-full min-w-0 items-center gap-2 text-left"
-          onClick={onToggleExpanded}
-        >
-          <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 truncate text-sm font-semibold">
-            {group.name}
-          </span>
-          <Badge variant="secondary" className="text-xs">
-            {group.providers.length}
-          </Badge>
-        </button>
-        {!isExpanded && activeProvider && (
-          <div
-            data-testid={`provider-group-active-provider-${group.id}`}
-            className="mt-1.5 flex min-w-0 w-full items-start gap-1.5 rounded-md border border-emerald-300/70 bg-emerald-100/80 px-2.5 py-1.5 text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/70 dark:text-emerald-200"
+          <button
+            type="button"
+            className="flex w-full min-w-0 items-center gap-2 text-left"
+            onClick={onToggleExpanded}
           >
-            <Activity className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <div className="min-w-0 flex-1 leading-tight">
-              <div className="flex min-w-0 items-center gap-1.5">
-                <span className="shrink-0 text-[11px] font-medium">
-                  {t("provider.groupActiveProvider", {
-                    defaultValue: "正在使用",
-                  })}
-                </span>
-                <span className="min-w-0 truncate text-xs font-semibold">
-                  {activeProvider.name}
-                </span>
+            <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate text-sm font-semibold">
+              {group.name}
+            </span>
+            <Badge variant="secondary" className="text-xs">
+              {group.providers.length}
+            </Badge>
+          </button>
+          {!isExpanded && activeProvider && (
+            <div
+              data-testid={`provider-group-active-provider-${group.id}`}
+              className="mt-1.5 flex min-w-0 w-full items-start gap-1.5 rounded-md border border-emerald-300/70 bg-emerald-100/80 px-2.5 py-1.5 text-emerald-800 dark:border-emerald-800/80 dark:bg-emerald-950/70 dark:text-emerald-200"
+            >
+              <Activity className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <div className="min-w-0 flex-1 leading-tight">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="shrink-0 text-[11px] font-medium">
+                    {t("provider.groupActiveProvider", {
+                      defaultValue: "正在使用",
+                    })}
+                  </span>
+                  <span className="min-w-0 truncate text-xs font-semibold">
+                    {activeProvider.name}
+                  </span>
+                </div>
+                {activeProviderUrl && (
+                  <span
+                    data-testid={`provider-group-active-url-${group.id}`}
+                    title={activeProviderUrl}
+                    className="mt-0.5 block truncate text-[11px] text-emerald-700/85 dark:text-emerald-300/85"
+                  >
+                    {activeProviderUrl}
+                  </span>
+                )}
               </div>
-              {activeProviderUrl && (
-                <span
-                  data-testid={`provider-group-active-url-${group.id}`}
-                  title={activeProviderUrl}
-                  className="mt-0.5 block truncate text-[11px] text-emerald-700/85 dark:text-emerald-300/85"
-                >
-                  {activeProviderUrl}
-                </span>
-              )}
             </div>
-          </div>
-        )}
+          )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1">
-        {modelTestSummary && (
-          <div
-            data-testid={`provider-group-model-test-summary-${group.id}`}
-            title={t("provider.groupModelTestSummary", {
-              defaultValue:
-                "模型测试：{{operational}} 正常，{{degraded}} 降级，{{failed}} 失败",
-              operational: modelTestSummary.operational,
-              degraded: modelTestSummary.degraded,
-              failed: modelTestSummary.failed,
-            })}
-            className="hidden shrink-0 items-center gap-1.5 text-[10px] sm:flex"
-          >
-            {isTestingModels && (
-              <span className="text-muted-foreground">
-                {modelTestSummary.completed}/{modelTestSummary.total}
+          {modelTestSummary && (
+            <div
+              data-testid={`provider-group-model-test-summary-${group.id}`}
+              title={t("provider.groupModelTestSummary", {
+                defaultValue:
+                  "模型测试：{{operational}} 正常，{{degraded}} 降级，{{failed}} 失败",
+                operational: modelTestSummary.operational,
+                degraded: modelTestSummary.degraded,
+                failed: modelTestSummary.failed,
+              })}
+              className="hidden shrink-0 items-center gap-1.5 text-[10px] sm:flex"
+            >
+              {isTestingModels && (
+                <span className="text-muted-foreground">
+                  {modelTestSummary.completed}/{modelTestSummary.total}
+                </span>
+              )}
+              <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                {modelTestSummary.operational}
               </span>
-            )}
-            <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              {modelTestSummary.operational}
-            </span>
-            <span className="inline-flex items-center gap-1 text-yellow-700 dark:text-yellow-300">
-              <span className="h-1.5 w-1.5 rounded-full bg-yellow-500" />
-              {modelTestSummary.degraded}
-            </span>
-            <span className="inline-flex items-center gap-1 text-red-700 dark:text-red-300">
-              <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
-              {modelTestSummary.failed}
-            </span>
-          </div>
-        )}
-        <Button
-          variant="ghost"
-          size="icon"
-          data-testid={`provider-group-model-test-${group.id}`}
-          className="h-7 w-7"
-          disabled={isTestModelsDisabled}
-          onClick={onTestModels}
-          title={t("provider.testGroupModels", {
-            defaultValue: "测试分组模型",
-          })}
-          aria-label={t("provider.testGroupModels", {
-            defaultValue: "测试分组模型",
-          })}
-        >
-          {isTestingModels ? (
-            <LoaderCircle className="h-4 w-4 animate-spin" />
-          ) : (
-            <TestTube2 className="h-4 w-4" />
+              <span className="inline-flex items-center gap-1 text-yellow-700 dark:text-yellow-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-yellow-500" />
+                {modelTestSummary.degraded}
+              </span>
+              <span className="inline-flex items-center gap-1 text-red-700 dark:text-red-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+                {modelTestSummary.failed}
+              </span>
+            </div>
           )}
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={onToggleExpanded}
-          title={
-            isExpanded
-              ? t("common.collapse", { defaultValue: "收起" })
-              : t("common.expand", { defaultValue: "展开" })
-          }
-          aria-label={
-            isExpanded
-              ? t("common.collapse", { defaultValue: "收起" })
-              : t("common.expand", { defaultValue: "展开" })
-          }
-        >
-          <ChevronDown
-            className={cn(
-              "h-4 w-4 transition-transform",
-              isExpanded && "rotate-180",
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid={`provider-group-model-test-${group.id}`}
+            className="h-7 w-7"
+            disabled={isTestModelsDisabled}
+            onClick={onTestModels}
+            title={t("provider.testGroupModels", {
+              defaultValue: "测试分组模型",
+            })}
+            aria-label={t("provider.testGroupModels", {
+              defaultValue: "测试分组模型",
+            })}
+          >
+            {isTestingModels ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <TestTube2 className="h-4 w-4" />
             )}
-          />
-        </Button>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              data-testid={`provider-group-menu-${group.id}`}
-              className="h-7 w-7"
-              aria-label={t("provider.groupMenu", {
-                defaultValue: "分组菜单",
-              })}
-            >
-              <MoreHorizontal className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48">
-            <DropdownMenuLabel className="truncate">
-              {group.name}
-            </DropdownMenuLabel>
-            {isFailoverActionsAvailable && (
-              <>
-                <DropdownMenuItem
-                  data-testid={`provider-group-add-failover-${group.id}`}
-                  disabled={isFailoverActionRunning || !canAddToFailoverQueue}
-                  onClick={onAddToFailoverQueue}
-                >
-                  {isFailoverActionRunning ? (
-                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Activity className="mr-2 h-4 w-4" />
-                  )}
-                  {t("provider.groupAddToFailoverQueue", {
-                    defaultValue: "整组加入故障转移队列",
-                  })}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  data-testid={`provider-group-remove-failover-${group.id}`}
-                  disabled={
-                    isFailoverActionRunning || !canRemoveFromFailoverQueue
-                  }
-                  onClick={onRemoveFromFailoverQueue}
-                >
-                  {isFailoverActionRunning ? (
-                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <X className="mr-2 h-4 w-4" />
-                  )}
-                  {t("provider.groupRemoveFromFailoverQueue", {
-                    defaultValue: "整组移出故障转移队列",
-                  })}
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-              </>
-            )}
-            <DropdownMenuItem onClick={onClearGroup}>
-              <Ungroup className="mr-2 h-4 w-4" />
-              {t("provider.clearGroup", { defaultValue: "取消分组" })}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              onClick={onDeleteGroup}
-            >
-              <Trash2 className="mr-2 h-4 w-4" />
-              {t("provider.deleteGroupProviders", {
-                defaultValue: "删除组内供应商",
-              })}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={onToggleExpanded}
+            title={
+              isExpanded
+                ? t("common.collapse", { defaultValue: "收起" })
+                : t("common.expand", { defaultValue: "展开" })
+            }
+            aria-label={
+              isExpanded
+                ? t("common.collapse", { defaultValue: "收起" })
+                : t("common.expand", { defaultValue: "展开" })
+            }
+          >
+            <ChevronDown
+              className={cn(
+                "h-4 w-4 transition-transform",
+                isExpanded && "rotate-180",
+              )}
+            />
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                data-testid={`provider-group-menu-${group.id}`}
+                className="h-7 w-7"
+                aria-label={t("provider.groupMenu", {
+                  defaultValue: "分组菜单",
+                })}
+              >
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuLabel className="truncate">
+                {group.name}
+              </DropdownMenuLabel>
+              {isFailoverActionsAvailable && (
+                <>
+                  <DropdownMenuItem
+                    data-testid={`provider-group-add-failover-${group.id}`}
+                    disabled={isFailoverActionRunning || !canAddToFailoverQueue}
+                    onClick={onAddToFailoverQueue}
+                  >
+                    {isFailoverActionRunning ? (
+                      <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Activity className="mr-2 h-4 w-4" />
+                    )}
+                    {t("provider.groupAddToFailoverQueue", {
+                      defaultValue: "整组加入故障转移队列",
+                    })}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    data-testid={`provider-group-remove-failover-${group.id}`}
+                    disabled={
+                      isFailoverActionRunning || !canRemoveFromFailoverQueue
+                    }
+                    onClick={onRemoveFromFailoverQueue}
+                  >
+                    {isFailoverActionRunning ? (
+                      <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <X className="mr-2 h-4 w-4" />
+                    )}
+                    {t("provider.groupRemoveFromFailoverQueue", {
+                      defaultValue: "整组移出故障转移队列",
+                    })}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
+              <DropdownMenuItem onClick={onClearGroup}>
+                <Ungroup className="mr-2 h-4 w-4" />
+                {t("provider.clearGroup", { defaultValue: "取消分组" })}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onClick={onDeleteGroup}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                {t("provider.deleteGroupProviders", {
+                  defaultValue: "删除组内供应商",
+                })}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
-      {isExpanded && (
-        <div className="space-y-3 px-3 pb-3">{children}</div>
-      )}
+      {isExpanded && <div className="space-y-3 px-3 pb-3">{children}</div>}
     </div>
   );
 }
@@ -2360,6 +2361,7 @@ function SortableProviderCard({
     transform: CSS.Transform.toString(transform),
     transition,
   };
+  const selectionPointerHandledRef = useRef(false);
 
   return (
     <div
@@ -2382,10 +2384,30 @@ function SortableProviderCard({
           tabIndex={0}
           aria-checked={isSelected}
           aria-label="选择供应商"
-          className="touch-none select-none pt-5"
-          onPointerDown={(event) =>
-            onSelectionSwipeStart(event, provider.id, isSelected)
-          }
+          className="flex w-9 touch-none select-none justify-center self-stretch rounded-md pt-5 transition-colors hover:bg-muted/60"
+          onPointerDown={(event) => {
+            if (event.button === 0) {
+              selectionPointerHandledRef.current = true;
+            }
+            onSelectionSwipeStart(event, provider.id, isSelected);
+          }}
+          onPointerUp={() => {
+            window.setTimeout(() => {
+              selectionPointerHandledRef.current = false;
+            }, 250);
+          }}
+          onPointerCancel={() => {
+            selectionPointerHandledRef.current = false;
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (selectionPointerHandledRef.current) {
+              selectionPointerHandledRef.current = false;
+              return;
+            }
+            onToggleSelected(!isSelected);
+          }}
           onKeyDown={(event) => {
             if (event.key !== " " && event.key !== "Enter") return;
             event.preventDefault();
@@ -2401,47 +2423,49 @@ function SortableProviderCard({
         </div>
       )}
       <div className="min-w-0 flex-1">
-      <ProviderCard
-        provider={provider}
-        isCurrent={isCurrent}
-        appId={appId}
-        isInConfig={isInConfig}
-        isOmo={isOmo}
-        isOmoSlim={isOmoSlim}
-        onSwitch={onSwitch}
-        onEdit={onEdit}
-        onDelete={onDelete}
-        onRemoveFromConfig={onRemoveFromConfig}
-        onDisableOmo={onDisableOmo}
-        onDisableOmoSlim={onDisableOmoSlim}
-        onDuplicate={onDuplicate}
-        onConfigureUsage={
-          onConfigureUsage ? (item) => onConfigureUsage(item) : () => undefined
-        }
-        onOpenWebsite={onOpenWebsite}
-        onOpenTerminal={onOpenTerminal}
-        onTest={onTest}
-        onTestModels={onTestModels}
-        isTesting={isTesting}
-        isTestingModels={isTestingModels}
-        modelTestResult={modelTestResult}
-        isProxyRunning={isProxyRunning}
-        isProxyTakeover={isProxyTakeover}
-        dragHandleProps={{
-          attributes,
-          listeners,
-          isDragging,
-        }}
-        isAutoFailoverEnabled={isAutoFailoverEnabled}
-        failoverPriority={failoverPriority}
-        isInFailoverQueue={isInFailoverQueue}
-        onToggleFailover={onToggleFailover}
-        activeProviderId={activeProviderId}
-        // OpenClaw: default model
-        isDefaultModel={isDefaultModel}
-        onSetAsDefault={onSetAsDefault}
-        groupMenu={groupMenu}
-      />
+        <ProviderCard
+          provider={provider}
+          isCurrent={isCurrent}
+          appId={appId}
+          isInConfig={isInConfig}
+          isOmo={isOmo}
+          isOmoSlim={isOmoSlim}
+          onSwitch={onSwitch}
+          onEdit={onEdit}
+          onDelete={onDelete}
+          onRemoveFromConfig={onRemoveFromConfig}
+          onDisableOmo={onDisableOmo}
+          onDisableOmoSlim={onDisableOmoSlim}
+          onDuplicate={onDuplicate}
+          onConfigureUsage={
+            onConfigureUsage
+              ? (item) => onConfigureUsage(item)
+              : () => undefined
+          }
+          onOpenWebsite={onOpenWebsite}
+          onOpenTerminal={onOpenTerminal}
+          onTest={onTest}
+          onTestModels={onTestModels}
+          isTesting={isTesting}
+          isTestingModels={isTestingModels}
+          modelTestResult={modelTestResult}
+          isProxyRunning={isProxyRunning}
+          isProxyTakeover={isProxyTakeover}
+          dragHandleProps={{
+            attributes,
+            listeners,
+            isDragging,
+          }}
+          isAutoFailoverEnabled={isAutoFailoverEnabled}
+          failoverPriority={failoverPriority}
+          isInFailoverQueue={isInFailoverQueue}
+          onToggleFailover={onToggleFailover}
+          activeProviderId={activeProviderId}
+          // OpenClaw: default model
+          isDefaultModel={isDefaultModel}
+          onSetAsDefault={onSetAsDefault}
+          groupMenu={groupMenu}
+        />
       </div>
     </div>
   );
