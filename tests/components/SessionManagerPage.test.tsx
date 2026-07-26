@@ -18,8 +18,7 @@ const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
 const GROUP_EXPANSION_STORAGE_KEY =
   "cc-switch.sessionManager.groupExpansionState";
-const PINNED_SESSIONS_STORAGE_KEY =
-  "cc-switch.sessionManager.pinnedSessions";
+const PINNED_SESSIONS_STORAGE_KEY = "cc-switch.sessionManager.pinnedSessions";
 
 vi.mock("sonner", () => ({
   toast: {
@@ -266,14 +265,12 @@ describe("SessionManagerPage", () => {
     };
     const pinnedKey = "codex:pinned-session:/mock/codex/pinned.jsonl";
     let resolveSessions: ((sessions: SessionMeta[]) => void) | undefined;
-    const listSpy = vi
-      .spyOn(sessionsApi, "list")
-      .mockImplementation(
-        () =>
-          new Promise<SessionMeta[]>((resolve) => {
-            resolveSessions = resolve;
-          }),
-      );
+    const listSpy = vi.spyOn(sessionsApi, "list").mockImplementation(
+      () =>
+        new Promise<SessionMeta[]>((resolve) => {
+          resolveSessions = resolve;
+        }),
+    );
 
     window.localStorage.setItem(
       PINNED_SESSIONS_STORAGE_KEY,
@@ -774,15 +771,11 @@ describe("SessionManagerPage", () => {
 
     await waitFor(() =>
       expect(
-        JSON.parse(
-          window.localStorage.getItem(PINNED_SESSIONS_STORAGE_KEY)!,
-        ),
+        JSON.parse(window.localStorage.getItem(PINNED_SESSIONS_STORAGE_KEY)!),
       ).toHaveLength(1),
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "扫描可清理会话" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "扫描可清理会话" }));
 
     const cleanupDialog = await screen.findByTestId("confirm-dialog");
     expect(cleanupDialog).toHaveTextContent("2");
@@ -797,6 +790,8 @@ describe("SessionManagerPage", () => {
         "批量删除会话",
       ),
     );
-    expect(screen.getByText("Alpha Session")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Alpha Session" }),
+    ).toBeInTheDocument();
   });
 });

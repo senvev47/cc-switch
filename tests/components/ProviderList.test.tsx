@@ -1,4 +1,5 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactElement } from "react";
@@ -299,25 +300,15 @@ describe("ProviderList Component", () => {
       />,
     );
 
-    // Verify sort order
-    expect(providerCardRenderSpy).toHaveBeenCalledTimes(2);
-    expect(providerCardRenderSpy.mock.calls[0][0].provider.id).toBe("b");
-    expect(providerCardRenderSpy.mock.calls[1][0].provider.id).toBe("a");
-
-    // Verify current provider marker
-    expect(providerCardRenderSpy.mock.calls[0][0].isCurrent).toBe(true);
-
-    // Drag attributes from useSortable
+    // Verify final sort order and card props as rendered.
     expect(
-      providerCardRenderSpy.mock.calls[0][0].dragHandleProps?.attributes[
-      "data-dnd-id"
-      ],
-    ).toBe("b");
-    expect(
-      providerCardRenderSpy.mock.calls[1][0].dragHandleProps?.attributes[
-      "data-dnd-id"
-      ],
-    ).toBe("a");
+      screen
+        .getAllByTestId(/^provider-card-/)
+        .map((element) => element.getAttribute("data-testid")),
+    ).toEqual(["provider-card-b", "provider-card-a"]);
+    expect(screen.getByTestId("is-current-b")).toHaveTextContent("current");
+    expect(screen.getByTestId("drag-attr-b")).toHaveTextContent("b");
+    expect(screen.getByTestId("drag-attr-a")).toHaveTextContent("a");
 
     // Trigger action buttons
     fireEvent.click(screen.getByTestId("switch-b"));
@@ -577,11 +568,13 @@ describe("ProviderList Component", () => {
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).not.toBe(0);
     expect(
-      group.compareDocumentPosition(afterCard) & Node.DOCUMENT_POSITION_FOLLOWING,
+      group.compareDocumentPosition(afterCard) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
     ).not.toBe(0);
   });
 
-  it("selects providers while sweeping across cards in group management mode", () => {
+  it("selects providers while sweeping across cards in group management mode", async () => {
+    const user = userEvent.setup();
     const groupedProvider = createProvider({
       id: "grouped",
       meta: {
@@ -614,23 +607,24 @@ describe("ProviderList Component", () => {
 
     fireEvent.click(screen.getByTestId("provider-group-manage-toggle"));
 
-    const firstControl = screen.getByTestId(
-      "provider-selection-control-first",
-    );
+    const firstControl = screen.getByTestId("provider-selection-control-first");
     const secondControl = screen.getByTestId(
       "provider-selection-control-second",
     );
-    fireEvent.pointerDown(firstControl, { button: 0, pointerId: 7 });
-    fireEvent.pointerEnter(screen.getByTestId("sortable-provider-card-second"), {
-      pointerId: 7,
-    });
-    fireEvent.pointerUp(window, { pointerId: 7 });
+    await user.pointer([
+      { keys: "[MouseLeft>]", target: firstControl },
+      { target: screen.getByTestId("sortable-provider-card-second") },
+      { keys: "[/MouseLeft]" },
+    ]);
 
-    expect(firstControl).toHaveAttribute("data-selected", "true");
-    expect(secondControl).toHaveAttribute("data-selected", "true");
+    await waitFor(() => {
+      expect(firstControl).toHaveAttribute("data-selected", "true");
+      expect(secondControl).toHaveAttribute("data-selected", "true");
+    });
   });
 
-  it("selects a provider with one click in group management mode", () => {
+  it("selects a provider with one click in group management mode", async () => {
+    const user = userEvent.setup();
     const groupedProvider = createProvider({
       id: "grouped",
       meta: {
@@ -662,13 +656,12 @@ describe("ProviderList Component", () => {
 
     fireEvent.click(screen.getByTestId("provider-group-manage-toggle"));
 
-    const firstControl = screen.getByTestId(
-      "provider-selection-control-first",
-    );
-    fireEvent.pointerDown(firstControl, { button: 0, pointerId: 17 });
-    fireEvent.pointerUp(window, { pointerId: 17 });
+    const firstControl = screen.getByTestId("provider-selection-control-first");
+    await user.click(firstControl);
 
-    expect(firstControl).toHaveAttribute("data-selected", "true");
+    await waitFor(() =>
+      expect(firstControl).toHaveAttribute("data-selected", "true"),
+    );
   });
 
   it("adds every missing provider in a group to the failover queue", async () => {
@@ -710,9 +703,10 @@ describe("ProviderList Component", () => {
       />,
     );
 
-    fireEvent.click(screen.getByTestId("provider-group-menu-group-team"));
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("provider-group-menu-group-team"));
     fireEvent.click(
-      screen.getByTestId("provider-group-add-failover-group-team"),
+      await screen.findByTestId("provider-group-add-failover-group-team"),
     );
 
     await waitFor(() =>
@@ -770,9 +764,10 @@ describe("ProviderList Component", () => {
       />,
     );
 
-    fireEvent.click(screen.getByTestId("provider-group-menu-group-team"));
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("provider-group-menu-group-team"));
     fireEvent.click(
-      screen.getByTestId("provider-group-remove-failover-group-team"),
+      await screen.findByTestId("provider-group-remove-failover-group-team"),
     );
 
     await waitFor(() =>

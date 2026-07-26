@@ -4,6 +4,15 @@ import { server } from "./server";
 
 const TAURI_ENDPOINT = "http://tauri.local";
 
+const mockWindow = {
+  close: vi.fn().mockResolvedValue(undefined),
+  isMaximized: vi.fn().mockResolvedValue(false),
+  minimize: vi.fn().mockResolvedValue(undefined),
+  onResized: vi.fn().mockResolvedValue(() => undefined),
+  setDecorations: vi.fn().mockResolvedValue(undefined),
+  toggleMaximize: vi.fn().mockResolvedValue(undefined),
+};
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (command: string, payload: Record<string, unknown> = {}) => {
     const response = await fetch(`${TAURI_ENDPOINT}/${command}`, {
@@ -27,6 +36,10 @@ vi.mock("@tauri-apps/api/core", () => ({
       return text;
     }
   },
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => mockWindow,
 }));
 
 const listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();

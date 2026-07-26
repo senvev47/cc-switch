@@ -1412,7 +1412,10 @@ export function ProviderList({
       const swipe = providerSelectionSwipeRef.current;
       if (!swipe || swipe.pointerId !== event.pointerId) return;
 
-      const element = document.elementFromPoint(event.clientX, event.clientY);
+      const element =
+        typeof document.elementFromPoint === "function"
+          ? document.elementFromPoint(event.clientX, event.clientY)
+          : null;
       const target = element?.closest<HTMLElement>(
         "[data-provider-selection-id]",
       );

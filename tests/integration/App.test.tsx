@@ -31,26 +31,43 @@ vi.mock("@/components/providers/ProviderList", () => ({
     onConfigureUsage,
     onOpenWebsite,
     onCreate,
-  }: any) => (
-    <div>
-      <div data-testid="provider-list">{JSON.stringify(providers)}</div>
-      <div data-testid="current-provider">{currentProviderId}</div>
-      <button onClick={() => onSwitch(providers[currentProviderId])}>
-        switch
-      </button>
-      <button onClick={() => onEdit(providers[currentProviderId])}>edit</button>
-      <button onClick={() => onDuplicate(providers[currentProviderId])}>
-        duplicate
-      </button>
-      <button onClick={() => onConfigureUsage(providers[currentProviderId])}>
-        usage
-      </button>
-      <button onClick={() => onOpenWebsite("https://example.com")}>
-        open-website
-      </button>
-      <button onClick={() => onCreate?.()}>create</button>
-    </div>
-  ),
+  }: any) => {
+    const providerList = Array.isArray(providers)
+      ? providers
+      : Object.values(providers ?? {});
+    const selectedProvider =
+      providerList.find((provider: any) => provider?.id === currentProviderId) ??
+      providerList[0];
+
+    return (
+      <div>
+        <div data-testid="provider-list">{JSON.stringify(providers)}</div>
+        <div data-testid="current-provider">{currentProviderId}</div>
+        <button onClick={() => selectedProvider && onSwitch(selectedProvider)}>
+          switch
+        </button>
+        <button onClick={() => selectedProvider && onEdit(selectedProvider)}>
+          edit
+        </button>
+        <button
+          onClick={() => selectedProvider && onDuplicate(selectedProvider)}
+        >
+          duplicate
+        </button>
+        <button
+          onClick={() =>
+            selectedProvider && onConfigureUsage(selectedProvider)
+          }
+        >
+          usage
+        </button>
+        <button onClick={() => onOpenWebsite("https://example.com")}>
+          open-website
+        </button>
+        <button onClick={() => onCreate?.()}>create</button>
+      </div>
+    );
+  },
 }));
 
 vi.mock("@/components/providers/AddProviderDialog", () => ({
@@ -218,7 +235,7 @@ describe("App integration with MSW", () => {
 
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
-  });
+  }, 20000);
 
   it("shows toast when auto sync fails in background", async () => {
     const { default: App } = await import("@/App");

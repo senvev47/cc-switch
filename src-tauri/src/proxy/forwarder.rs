@@ -4458,6 +4458,7 @@ mod tests {
             forwarder.categorize_proxy_error(
                 &ProxyError::AuthError("xAI OAuth 认证失败".to_string()),
                 &provider,
+                true,
             ),
             ErrorCategory::NonRetryable
         );
@@ -4469,6 +4470,7 @@ mod tests {
                     body: None,
                 },
                 &provider,
+                true,
             ),
             ErrorCategory::Retryable
         );
