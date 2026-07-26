@@ -208,7 +208,7 @@ const filterSetToAllowedValues = (
 export function SessionManagerPage({ appId }: { appId: string }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const { data, isLoading, refetch } = useSessionsQuery();
+  const { data, isLoading, isSuccess, refetch } = useSessionsQuery();
   const sessions = data ?? [];
   const detailRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -332,7 +332,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   }, [isLoading, validGroupExpansionKeys]);
 
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || !isSuccess || sessions.length === 0) return;
 
     const validKeys = new Set(sessions.map((session) => getSessionKey(session)));
     setPinnedSessionKeys((current) => {
@@ -347,7 +347,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
       });
       return changed ? next : current;
     });
-  }, [isLoading, sessions]);
+  }, [isLoading, isSuccess, sessions]);
 
   useEffect(() => {
     if (orderedFilteredSessions.length === 0) {

@@ -344,9 +344,16 @@ export function ProviderList({
   const { data: failoverQueue } = useFailoverQueue(appId);
   const addToQueue = useAddToFailoverQueue();
   const removeFromQueue = useRemoveFromFailoverQueue();
+  const [groupFailoverActionId, setGroupFailoverActionId] = useState<
+    string | null
+  >(null);
 
   const isFailoverModeActive =
     isProxyTakeover === true && isAutoFailoverEnabled === true;
+  const failoverQueueProviderIds = useMemo(
+    () => new Set((failoverQueue ?? []).map((item) => item.providerId)),
+    [failoverQueue],
+  );
 
   const isOpenCode = appId === "opencode";
   const { data: currentOmoId } = useCurrentOmoProviderId(isOpenCode);
@@ -366,9 +373,9 @@ export function ProviderList({
   const isInFailoverQueue = useCallback(
     (providerId: string): boolean => {
       if (!isFailoverModeActive || !failoverQueue) return false;
-      return failoverQueue.some((item) => item.providerId === providerId);
+      return failoverQueueProviderIds.has(providerId);
     },
-    [isFailoverModeActive, failoverQueue],
+    [isFailoverModeActive, failoverQueue, failoverQueueProviderIds],
   );
 
   const handleToggleFailover = useCallback(
@@ -380,6 +387,117 @@ export function ProviderList({
       }
     },
     [appId, addToQueue, removeFromQueue],
+  );
+
+  const addGroupToFailoverQueue = useCallback(
+    async (group: ProviderGroupView) => {
+      if (!isFailoverModeActive || groupFailoverActionId) return;
+
+      const targets = group.providers.filter(
+        (provider) => !failoverQueueProviderIds.has(provider.id),
+      );
+      if (targets.length === 0) {
+        toast.info(
+          t("provider.groupFailoverAllQueued", {
+            defaultValue: "分组内供应商已全部在故障转移队列中",
+          }),
+        );
+        return;
+      }
+
+      setGroupFailoverActionId(group.id);
+      try {
+        for (const provider of targets) {
+          await addToQueue.mutateAsync({
+            appType: appId,
+            providerId: provider.id,
+          });
+        }
+        toast.success(
+          t("provider.groupFailoverAddSuccess", {
+            defaultValue: "已将 {{count}} 个分组供应商加入故障转移队列",
+            count: targets.length,
+          }),
+          { closeButton: true },
+        );
+      } catch (error) {
+        console.error("Failed to add provider group to failover queue", error);
+        toast.error(
+          t("provider.groupFailoverAddFailed", {
+            defaultValue: "分组加入故障转移队列失败",
+          }),
+        );
+      } finally {
+        setGroupFailoverActionId((current) =>
+          current === group.id ? null : current,
+        );
+      }
+    },
+    [
+      addToQueue,
+      appId,
+      failoverQueueProviderIds,
+      groupFailoverActionId,
+      isFailoverModeActive,
+      t,
+    ],
+  );
+
+  const removeGroupFromFailoverQueue = useCallback(
+    async (group: ProviderGroupView) => {
+      if (!isFailoverModeActive || groupFailoverActionId) return;
+
+      const targets = group.providers.filter((provider) =>
+        failoverQueueProviderIds.has(provider.id),
+      );
+      if (targets.length === 0) {
+        toast.info(
+          t("provider.groupFailoverNoneQueued", {
+            defaultValue: "分组内供应商不在故障转移队列中",
+          }),
+        );
+        return;
+      }
+
+      setGroupFailoverActionId(group.id);
+      try {
+        for (const provider of targets) {
+          await removeFromQueue.mutateAsync({
+            appType: appId,
+            providerId: provider.id,
+          });
+        }
+        toast.success(
+          t("provider.groupFailoverRemoveSuccess", {
+            defaultValue: "已将 {{count}} 个分组供应商移出故障转移队列",
+            count: targets.length,
+          }),
+          { closeButton: true },
+        );
+      } catch (error) {
+        console.error(
+          "Failed to remove provider group from failover queue",
+          error,
+        );
+        toast.error(
+          t("provider.groupFailoverRemoveFailed", {
+            defaultValue: "分组移出故障转移队列失败",
+          }),
+        );
+      } finally {
+        setGroupFailoverActionId((current) =>
+          current === group.id ? null : current,
+        );
+      }
+    },
+    [
+      appId,
+      failoverQueueProviderIds,
+      groupFailoverActionId,
+      isFailoverModeActive,
+      removeFromQueue,
+      t,
+    ],
   );
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -1266,6 +1384,7 @@ export function ProviderList({
 
       event.preventDefault();
       event.stopPropagation();
+      event.currentTarget.setPointerCapture?.(event.pointerId);
       const checked = !isSelected;
       providerSelectionSwipeRef.current = { pointerId: event.pointerId, checked };
       toggleProviderSelected(providerId, checked);
@@ -1612,6 +1731,16 @@ export function ProviderList({
                   isTestingModels={groupTestingId === group.id}
                   isTestModelsDisabled={groupTestingId !== null}
                   modelTestSummary={groupModelTestSummaries[group.id]}
+                  isFailoverActionsAvailable={isFailoverModeActive}
+                  canAddToFailoverQueue={group.providers.some(
+                    (provider) => !failoverQueueProviderIds.has(provider.id),
+                  )}
+                  canRemoveFromFailoverQueue={group.providers.some((provider) =>
+                    failoverQueueProviderIds.has(provider.id),
+                  )}
+                  isFailoverActionRunning={
+                    groupFailoverActionId === group.id
+                  }
                   onToggleExpanded={() => {
                     setExpandedProviderGroupIds((current) => {
                       const next = new Set(current);
@@ -1626,6 +1755,12 @@ export function ProviderList({
                   onDeleteGroup={() => void deleteProviderGroup(fullGroup)}
                   onClearGroup={() => void clearProvidersGroup(fullGroup.providers)}
                   onTestModels={() => void handleTestGroupModels(fullGroup)}
+                  onAddToFailoverQueue={() =>
+                    void addGroupToFailoverQueue(fullGroup)
+                  }
+                  onRemoveFromFailoverQueue={() =>
+                    void removeGroupFromFailoverQueue(fullGroup)
+                  }
                 >
                   {group.providers.map((provider) =>
                     renderProviderCard(provider),
@@ -1872,10 +2007,16 @@ interface SortableProviderGroupProps {
   isTestingModels: boolean;
   isTestModelsDisabled: boolean;
   modelTestSummary?: GroupModelTestSummary;
+  isFailoverActionsAvailable: boolean;
+  canAddToFailoverQueue: boolean;
+  canRemoveFromFailoverQueue: boolean;
+  isFailoverActionRunning: boolean;
   onToggleExpanded: () => void;
   onDeleteGroup: () => void;
   onClearGroup: () => void;
   onTestModels: () => void;
+  onAddToFailoverQueue: () => void;
+  onRemoveFromFailoverQueue: () => void;
   children: ReactNode;
 }
 
@@ -1888,10 +2029,16 @@ function SortableProviderGroup({
   isTestingModels,
   isTestModelsDisabled,
   modelTestSummary,
+  isFailoverActionsAvailable,
+  canAddToFailoverQueue,
+  canRemoveFromFailoverQueue,
+  isFailoverActionRunning,
   onToggleExpanded,
   onDeleteGroup,
   onClearGroup,
   onTestModels,
+  onAddToFailoverQueue,
+  onRemoveFromFailoverQueue,
   children,
 }: SortableProviderGroupProps) {
   const { t } = useTranslation();
@@ -2089,6 +2236,7 @@ function SortableProviderGroup({
             <Button
               variant="ghost"
               size="icon"
+              data-testid={`provider-group-menu-${group.id}`}
               className="h-7 w-7"
               aria-label={t("provider.groupMenu", {
                 defaultValue: "分组菜单",
@@ -2101,6 +2249,41 @@ function SortableProviderGroup({
             <DropdownMenuLabel className="truncate">
               {group.name}
             </DropdownMenuLabel>
+            {isFailoverActionsAvailable && (
+              <>
+                <DropdownMenuItem
+                  data-testid={`provider-group-add-failover-${group.id}`}
+                  disabled={isFailoverActionRunning || !canAddToFailoverQueue}
+                  onClick={onAddToFailoverQueue}
+                >
+                  {isFailoverActionRunning ? (
+                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Activity className="mr-2 h-4 w-4" />
+                  )}
+                  {t("provider.groupAddToFailoverQueue", {
+                    defaultValue: "整组加入故障转移队列",
+                  })}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  data-testid={`provider-group-remove-failover-${group.id}`}
+                  disabled={
+                    isFailoverActionRunning || !canRemoveFromFailoverQueue
+                  }
+                  onClick={onRemoveFromFailoverQueue}
+                >
+                  {isFailoverActionRunning ? (
+                    <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <X className="mr-2 h-4 w-4" />
+                  )}
+                  {t("provider.groupRemoveFromFailoverQueue", {
+                    defaultValue: "整组移出故障转移队列",
+                  })}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
+            )}
             <DropdownMenuItem onClick={onClearGroup}>
               <Ungroup className="mr-2 h-4 w-4" />
               {t("provider.clearGroup", { defaultValue: "取消分组" })}
@@ -2195,15 +2378,25 @@ function SortableProviderCard({
         <div
           data-testid={`provider-selection-control-${provider.id}`}
           data-selected={isSelected ? "true" : "false"}
+          role="checkbox"
+          tabIndex={0}
+          aria-checked={isSelected}
+          aria-label="选择供应商"
           className="touch-none select-none pt-5"
-          onPointerDownCapture={(event) =>
+          onPointerDown={(event) =>
             onSelectionSwipeStart(event, provider.id, isSelected)
           }
+          onKeyDown={(event) => {
+            if (event.key !== " " && event.key !== "Enter") return;
+            event.preventDefault();
+            onToggleSelected(!isSelected);
+          }}
         >
           <Checkbox
             checked={isSelected}
-            aria-label="选择供应商"
-            onCheckedChange={(checked) => onToggleSelected(Boolean(checked))}
+            aria-hidden="true"
+            tabIndex={-1}
+            className="pointer-events-none"
           />
         </div>
       )}
