@@ -12,7 +12,10 @@ import { ProviderCategory } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
 
 export type ClaudeDesktopApiFormat =
-  "anthropic" | "openai_chat" | "openai_responses" | "gemini_native";
+  | "anthropic"
+  | "openai_chat"
+  | "openai_responses"
+  | "gemini_native";
 
 export interface ClaudeDesktopRoutePreset {
   routeId: string;

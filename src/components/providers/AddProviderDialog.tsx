@@ -273,7 +273,8 @@ export function AddProviderDialog({
           }
         } else if (appId === "opencode") {
           const options = parsedConfig.options as
-            Record<string, any> | undefined;
+            | Record<string, any>
+            | undefined;
           if (options?.baseURL) {
             addUrl(options.baseURL);
           }

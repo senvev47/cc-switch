@@ -5,7 +5,11 @@ import { settingsApi } from "@/lib/api";
 import { syncCurrentProvidersLiveSafe } from "@/utils/postChangeSync";
 
 export type ImportStatus =
-  "idle" | "importing" | "success" | "partial-success" | "error";
+  | "idle"
+  | "importing"
+  | "success"
+  | "partial-success"
+  | "error";
 
 export interface UseImportExportOptions {
   onImportSuccess?: () => void | Promise<void>;

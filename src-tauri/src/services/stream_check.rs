@@ -120,12 +120,18 @@ impl StreamCheckService {
         config: &StreamCheckConfig,
         base_url_override: Option<String>,
     ) -> Result<StreamCheckResult, AppError> {
+        let effective_config = Self::merge_provider_config(provider, config);
         let mut last_result: Option<StreamCheckResult> = None;
-        for attempt in 0..=config.max_retries {
+        for attempt in 0..=effective_config.max_retries {
             let start = Instant::now();
-            let result =
-                Self::check_once(app_type, provider, config, base_url_override.clone(), start)
-                    .await?;
+            let result = Self::check_once(
+                app_type,
+                provider,
+                &effective_config,
+                base_url_override.clone(),
+                start,
+            )
+            .await?;
 
             if result.success {
                 return Ok(StreamCheckResult {
@@ -135,7 +141,7 @@ impl StreamCheckService {
             }
 
             // 仅超时 / abort 类网络抖动值得重试；连接被拒、DNS 失败等立即返回。
-            if Self::should_retry(&result.message) && attempt < config.max_retries {
+            if Self::should_retry(&result.message) && attempt < effective_config.max_retries {
                 last_result = Some(result);
                 continue;
             }
@@ -153,7 +159,7 @@ impl StreamCheckService {
             http_status: None,
             model_used: String::new(),
             tested_at: chrono::Utc::now().timestamp(),
-            retry_count: config.max_retries,
+            retry_count: effective_config.max_retries,
             error_category: None,
         }))
     }

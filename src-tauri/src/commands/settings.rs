@@ -3,6 +3,8 @@
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 
+const OFFICIAL_IN_APP_UPDATES_DISABLED: bool = true;
+
 /// 应用更新下载进度（通过 `update-download-progress` 事件发给前端）。
 #[derive(Clone, serde::Serialize)]
 struct UpdateDownloadProgress {
@@ -199,11 +201,13 @@ pub async fn restart_app(app: AppHandle) -> Result<bool, String> {
 /// 这里把退出清理、安装和重启串在同一个后端流程中，避免依赖旧前端继续执行。
 #[tauri::command]
 pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> {
-    let _ = &app;
-    return Err(
-        "This is a custom cc-switch build. Official in-app updates are disabled so the proxy watchdog and model-test UI are not overwritten. Build updates from the senvev47/cc-switch fork instead."
-            .to_string(),
-    );
+    if OFFICIAL_IN_APP_UPDATES_DISABLED {
+        let _ = &app;
+        return Err(
+            "This is a custom cc-switch build. Official in-app updates are disabled so the proxy watchdog and model-test UI are not overwritten. Build updates from the senvev47/cc-switch fork instead."
+                .to_string(),
+        );
+    }
 
     let updater = app
         .updater_builder()
@@ -282,8 +286,10 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> 
 /// 升级无法解决，而不是让其反复尝试。
 #[tauri::command]
 pub async fn check_app_update_available(app: AppHandle) -> Result<Option<String>, String> {
-    let _ = &app;
-    return Ok(None);
+    if OFFICIAL_IN_APP_UPDATES_DISABLED {
+        let _ = &app;
+        return Ok(None);
+    }
 
     let updater = app
         .updater_builder()
