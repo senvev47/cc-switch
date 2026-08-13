@@ -7,10 +7,25 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig};
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+
+/// `session_routes` 的容量上限。
+///
+/// 仅当插入新绑定导致超过此阈值时才触发回收（TTL 清理 + 淘汰最旧），回收成本被
+/// 摊销到「超阈值插入」路径，常态下无需后台任务。绑定数远小于真实终端数时此
+/// 阈值不会被触及（一次性 UUID 已被 `client_provided` 门控挡在写入路径之外）。
+const MAX_SESSION_ROUTES: usize = 512;
+
+/// 会话绑定的存活时长。超过后在下一次超阈值插入时被回收。
+///
+/// 30 分钟覆盖典型 codex 终端一次会话的工作时长；终端在 TTL 内持续发请求会通过
+/// 命中分支刷新 `last_used`，从而续期。
+const SESSION_ROUTE_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// 单个会话绑定的路由起点信息（Feature #2：按终端路由）
 ///
@@ -23,6 +38,9 @@ struct SessionRoute {
     queue_len_at_bind: usize,
     /// 起点偏移：`ordered_ids[offset]` 为该会话的 P1
     offset: usize,
+    /// 最近一次命中该绑定的时间；用于超阈值插入时的 TTL 回收与淘汰最旧。
+    /// 命中分支在复用 offset 前会刷新此字段（续期），活跃会话不会被误回收。
+    last_used: Instant,
 }
 
 /// 供应商路由器
@@ -139,15 +157,17 @@ impl ProviderRouter {
     ///      而非 `extract_session_id` 生成的临时 UUID）。
     ///
     /// 第 3 条是内存安全阀：缺失稳定会话标识的请求会拿到一个一次性 UUID，
-    /// 若也写入 `session_routes` 则每条请求都新增一条永不清除的条目（`clear_*`
-    /// 驱逐函数未接线）。一次性 UUID 没有终端连续性，按终端路由对它无意义，
-    /// 因此这类请求一律退化为全局 `select_providers`，零回归且不泄漏。
+    /// 若也写入 `session_routes` 则每条请求都新增一条永不清除的条目。一次性 UUID
+    /// 没有终端连续性，按终端路由对它无意义，因此这类请求一律退化为全局
+    /// `select_providers`，零回归且不泄漏。`clear_*` 驱逐函数已在队列增删/故障转移
+    /// 关闭/SQL 导入等变更点接线（见模块文档），但即便未触发，此处门控也已堵住泄漏源头。
     ///
     /// 起点（offset）的绑定规则：
-    ///   - 首次见到该会话：若策略为 `rotate`，offset = 当前已绑定会话数（模队列长度），
-    ///     使新终端尽量落在下一个 provider；策略为 `reuse`（默认）时 offset = 0，
+    ///   - 首次见到该会话：若策略为 `rotate`，offset = 当前**仍有效**的已绑定会话数
+    ///     （同 app_type 且 `queue_len_at_bind == queue_len`，模队列长度），使新终端
+    ///     尽量落在下一个 provider；策略为 `reuse`（默认）时 offset = 0，
     ///     即沿用全局队列起点 P1。
-    ///   - 已绑定且队列长度未变：复用原 offset。
+    ///   - 已绑定且队列长度未变：复用原 offset，并刷新 `last_used` 续期。
     ///   - 队列长度发生变化（增删/重排 provider）：旧绑定失效，按「首次见到」重新派发。
     ///
     /// 关键不变量：轮转只改变起点，**不改变** provider 集合，也**不改变**熔断器 key
@@ -209,48 +229,104 @@ impl ProviderRouter {
             }
         };
 
-        let offset = match offset {
-            Some(off) => off,
-            None => {
-                // 首次见到该会话（或队列长度变化导致旧绑定失效）：派发新 offset。
-                let new_offset = if routing_config.is_rotate_policy() {
-                    // rotate：按当前已绑定会话数轮转，使新终端尽量落在不同 provider。
-                    let routes = self.session_routes.read().await;
-                    let count = routes
-                        .keys()
-                        .filter(|k| k.split_once(':').map(|(a, _)| a) == Some(app_type))
-                        .count();
-                    if queue_len == 0 {
-                        0
-                    } else {
-                        count % queue_len
+        // 命中已有绑定且 queue_len 仍匹配：刷新 last_used 以续期（活跃会话不会被
+        // 超阈值回收淘汰），复用原 offset。放在独立块内、释放写锁后再记录日志，
+        // 遵循锁卫生。未命中或已过期则落到下方「首次见到」分支重新派发。
+        if let Some(off) = offset {
+            {
+                let mut routes = self.session_routes.write().await;
+                if let Some(route) = routes.get_mut(&session_key) {
+                    if route.queue_len_at_bind == queue_len {
+                        route.last_used = Instant::now();
                     }
-                } else {
-                    // reuse（默认）：新终端沿用全局起点 P1。
-                    0
-                };
-
-                let bound_provider = ordered_ids.get(new_offset).cloned().unwrap_or_default();
-                {
-                    let mut routes = self.session_routes.write().await;
-                    routes.insert(
-                        session_key.clone(),
-                        SessionRoute {
-                            queue_len_at_bind: queue_len,
-                            offset: new_offset,
-                        },
-                    );
                 }
-                log::info!(
-                    "[{app_type}] 按终端路由：会话 {session_id} 绑定起点 P1 = {} (queue_len={})",
-                    bound_provider,
-                    queue_len
-                );
-                new_offset
             }
+            let bound_provider = ordered_ids.get(off).cloned().unwrap_or_default();
+            log::info!(
+                "[{app_type}] 按终端路由：会话 {session_id} 复用起点 P1 = {} (queue_len={})",
+                bound_provider,
+                queue_len
+            );
+            return self
+                .rotate_providers(app_type, ordered_ids, &all_providers, off, queue_len)
+                .await;
+        }
+
+        // 走到这里说明未命中已有绑定（首次见到该会话，或 queue_len 变化导致旧绑定失效）：
+        // 重新派发 offset 并写入新绑定。
+        let new_offset = if routing_config.is_rotate_policy() {
+            // rotate：按「当前仍有效的已绑定会话数」轮转，使新终端尽量落在不同 provider。
+            // 关键：只统计 queue_len_at_bind == queue_len 的绑定，排除已被队列变更作废的
+            // 过期条目，否则 count 偏大导致新终端撞到已用的起点上。
+            let routes = self.session_routes.read().await;
+            let count = routes
+                .iter()
+                .filter(|(k, route)| {
+                    k.split_once(':').map(|(a, _)| a) == Some(app_type)
+                        && route.queue_len_at_bind == queue_len
+                })
+                .count();
+            if queue_len == 0 {
+                0
+            } else {
+                count % queue_len
+            }
+        } else {
+            // reuse（默认）：新终端沿用全局起点 P1。
+            0
         };
 
-        // 5. 按 offset 轮转 ordered_ids，再走与 select_providers 完全一致的熔断器过滤。
+        let bound_provider = ordered_ids.get(new_offset).cloned().unwrap_or_default();
+        {
+            let mut routes = self.session_routes.write().await;
+            // 内存卫生：超过上限时先按 TTL 清理过期绑定，仍超则淘汰最旧的，保证
+            // session_routes 不随进程生命周期无限增长。成本仅摊销到超阈值插入路径。
+            if routes.len() >= MAX_SESSION_ROUTES {
+                routes.retain(|_, route| route.last_used.elapsed() < SESSION_ROUTE_TTL);
+                while routes.len() >= MAX_SESSION_ROUTES {
+                    // 找到 last_used 最旧的条目淘汰之。
+                    if let Some(oldest_key) = routes
+                        .iter()
+                        .min_by_key(|(_, route)| route.last_used)
+                        .map(|(k, _)| k.clone())
+                    {
+                        routes.remove(&oldest_key);
+                    } else {
+                        break;
+                    }
+                }
+            }
+            routes.insert(
+                session_key.clone(),
+                SessionRoute {
+                    queue_len_at_bind: queue_len,
+                    offset: new_offset,
+                    last_used: Instant::now(),
+                },
+            );
+        }
+        log::info!(
+            "[{app_type}] 按终端路由：会话 {session_id} 绑定起点 P1 = {} (queue_len={})",
+            bound_provider,
+            queue_len
+        );
+
+        self.rotate_providers(app_type, ordered_ids, &all_providers, new_offset, queue_len)
+            .await
+    }
+
+    /// 按 offset 轮转 `ordered_ids`，再走与 `select_providers` 完全一致的熔断器过滤。
+    ///
+    /// 抽出此 helper 是因为「命中已有绑定复用 offset」与「首次派发新 offset」两条路径
+    /// 后续的轮转 + 熔断过滤逻辑完全相同，集中到一处避免分叉。
+    async fn rotate_providers(
+        &self,
+        app_type: &str,
+        ordered_ids: Vec<String>,
+        all_providers: &IndexMap<String, Provider>,
+        offset: usize,
+        queue_len: usize,
+    ) -> Result<Vec<Provider>, AppError> {
         let rotated: Vec<String> = (0..queue_len)
             .map(|i| ordered_ids[(i + offset) % queue_len].clone())
             .collect();
@@ -282,15 +358,6 @@ impl ProviderRouter {
         }
 
         Ok(result)
-    }
-
-    /// 清除指定会话的路由绑定（会话结束时调用，避免内存无限增长）。
-    ///
-    /// 未找到时静默返回；非关键路径，不返回错误。
-    pub async fn clear_session_route(&self, app_type: &str, session_id: &str) {
-        let session_key = format!("{app_type}:{session_id}");
-        let mut routes = self.session_routes.write().await;
-        routes.remove(&session_key);
     }
 
     /// 清除指定应用下所有会话的路由绑定（配置/队列变更时调用）。

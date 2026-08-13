@@ -45,7 +45,7 @@ pub async fn import_config_from_file(
 ) -> Result<Value, String> {
     let db = state.db.clone();
     let db_for_sync = db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let payload = tauri::async_runtime::spawn_blocking(move || {
         let path_buf = PathBuf::from(&filePath);
         let backup_id = db.import_sql(&path_buf)?;
         let warning = post_sync_warning_from_result(Ok(run_post_import_sync(db_for_sync)));
@@ -56,7 +56,16 @@ pub async fn import_config_from_file(
     })
     .await
     .map_err(|e| format!("导入配置失败: {e}"))?
-    .map_err(|e: AppError| e.to_string())
+    .map_err(|e: AppError| e.to_string())?;
+
+    // SQL 导入可能替换任意应用的配置/队列，整个 session_routes 映射都不可信。
+    // 用已接线的 clear_all_session_routes 全量回收（内存卫生）。服务器未运行时为 no-op。
+    // 注意：此调用需在 spawn_blocking 块外、回到异步上下文中执行。
+    if let Err(e) = state.proxy_service.clear_all_session_routes().await {
+        log::warn!("[Import] 清除按终端会话路由绑定失败: {e}");
+    }
+
+    Ok(payload)
 }
 
 #[tauri::command]

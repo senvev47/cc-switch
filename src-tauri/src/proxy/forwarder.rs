@@ -2315,8 +2315,11 @@ impl RequestForwarder {
                     .await?;
             } else if codex_responses_to_chat && (!request_is_streaming || response.is_json()) {
                 // Codex→Chat 上游也可能在 HTTP 2xx 内携带 OpenAI 风格错误信封
-                // (429/余额/预扣费等被网关转成 200)。仅在开启故障转移时校验,避免对
-                // 单 provider 模式造成「错误体被吞成 503」的回归。
+                // (429/余额/预扣费等被网关转成 200)。该 JSON 校验与 anthropic 路径一致,
+                // **不受** `has_failover_candidates` 门控:即使单 provider / 故障转移关闭,
+                // 2xx 错误信封也作为失败浮出(单 provider 时无下一家可试,错误体按 TransformError
+                // 返回而非被当成成功吞掉)。只有流式 `*_stream_start` 变体才受
+                // `has_failover_candidates` 门控(见下方分支)。
                 response = self
                     .validate_codex_chat_success_response(response)
                     .await?;
@@ -3197,10 +3200,10 @@ fn codex_anthropic_error_envelope_message(body: &[u8]) -> Option<String> {
     Some(format!("{error_type}: {message}"))
 }
 
-/// OpenAI Chat Completions 风格的错误信封:`{"error": {...}}` 或顶层数组里第一个
-/// 携带 error 的对象。合法的 chat completion 永远不会有顶层 `error` 字段,因此
-/// 使用 `!is_null()` 的严格判定:只有当确实存在一个非 null 的 error 对象时才视为失败。
-/// 这比转换器侧 `.is_some()` 的判定更严格,避免误伤正常响应导致终端被「吞错」。
+/// OpenAI Chat Completions 风格的错误信封:`{"error": {...}}`。合法的 chat
+/// completion 永远不会有顶层 `error` 字段,因此使用 `!is_null()` 的严格判定:
+/// 只有当确实存在一个非 null 的 error 对象时才视为失败。这比转换器侧 `.is_some()`
+/// 的判定更严格,避免误伤正常响应导致终端被「吞错」。
 fn chat_error_envelope_message(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let error = value.get("error");

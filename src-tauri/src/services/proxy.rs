@@ -3223,6 +3223,20 @@ impl ProxyService {
         }
         Ok(())
     }
+
+    /// 清除指定应用下所有终端的会话路由绑定（Feature #2）。
+    ///
+    /// 在该应用故障转移队列增删、或该应用关闭自动故障转移时调用：既有的
+    /// `queue_len_at_bind` 已与当前队列不一致（或 failover 关闭导致
+    /// `select_providers_for_session` 退化），主动回收。镜像
+    /// `reset_provider_circuit_breaker` 的三层委托路径与「服务器未运行即 no-op」守卫。
+    pub async fn clear_app_session_routes(&self, app_type: &str) -> Result<(), String> {
+        if let Some(server) = self.server.read().await.as_ref() {
+            server.clear_app_session_routes(app_type).await;
+            log::info!("已清除应用 {app_type} 的按终端会话路由绑定");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

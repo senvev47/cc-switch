@@ -42,7 +42,14 @@ pub async fn add_to_failover_queue(
     state
         .db
         .add_to_failover_queue(&app_type, &provider_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // 队列长度/成员变化后，该应用既有按终端会话绑定的 queue_len_at_bind 已与
+    // 当前队列不一致（读取侧本就会忽略，但主动回收避免残留占内存）。仅作内存卫生。
+    if let Err(e) = state.proxy_service.clear_app_session_routes(&app_type).await {
+        log::warn!("[Failover] 清除应用 {app_type} 会话路由绑定失败: {e}");
+    }
+    Ok(())
 }
 
 /// 从故障转移队列移除供应商
@@ -55,7 +62,13 @@ pub async fn remove_from_failover_queue(
     state
         .db
         .remove_from_failover_queue(&app_type, &provider_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // 同 add_to_failover_queue：队列变化后旧绑定失效，主动回收（内存卫生）。
+    if let Err(e) = state.proxy_service.clear_app_session_routes(&app_type).await {
+        log::warn!("[Failover] 清除应用 {app_type} 会话路由绑定失败: {e}");
+    }
+    Ok(())
 }
 
 /// 获取指定应用的自动故障转移开关状态（从 proxy_config 表读取）
@@ -160,6 +173,16 @@ pub async fn set_auto_failover_enabled(
         .update_proxy_config_for_app(config)
         .await
         .map_err(|e| e.to_string())?;
+
+    // 关闭故障转移时清除该应用的按终端会话绑定：failover 关闭后
+    // `select_providers_for_session` 会在第 2 步退化为 `select_providers`，既有
+    // 绑定已失效，主动回收（内存卫生）。开启时不清除——既有 offset 仍有效，
+    // 新会话按策略正常派发。
+    if !enabled {
+        if let Err(e) = state.proxy_service.clear_app_session_routes(&app_type).await {
+            log::warn!("[Failover] 清除应用 {app_type} 会话路由绑定失败: {e}");
+        }
+    }
 
     if enabled {
         // 发射 provider-switched 事件（让前端刷新当前供应商）

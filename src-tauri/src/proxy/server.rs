@@ -412,4 +412,18 @@ impl ProxyServer {
     pub async fn clear_all_session_routes(&self) {
         self.state.provider_router.clear_all_session_routes().await;
     }
+
+    /// 清除指定应用下所有终端的会话路由绑定（Feature #2）。
+    ///
+    /// 在该应用的故障转移队列发生增删、或该应用关闭自动故障转移时调用：
+    /// 此时同一 app_type 下的既有绑定其 `queue_len_at_bind` 已与当前队列不一致
+    /// （或 failover 已关导致 `select_providers_for_session` 退化），主动回收避免
+    /// 残留。与 `clear_all_session_routes` 同样仅为内存卫生——读取侧本就会忽略
+    /// 队列长度不匹配的过期绑定。
+    pub async fn clear_app_session_routes(&self, app_type: &str) {
+        self.state
+            .provider_router
+            .clear_app_session_routes(app_type)
+            .await;
+    }
 }
