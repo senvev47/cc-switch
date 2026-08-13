@@ -120,6 +120,7 @@ impl RequestContext {
         // 提取 Session ID
         let session_result = extract_session_id(headers, body, app_type_str);
         let session_id = session_result.session_id.clone();
+        let session_client_provided = session_result.client_provided;
 
         log::debug!(
             "[{}] Session ID: {} (from {:?}, client_provided: {})",
@@ -131,9 +132,14 @@ impl RequestContext {
 
         // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
+        //
+        // Feature #2（按终端路由）：传入已提取的 session_id 及其来源稳定性。
+        // 仅当 PerTerminalRoutingConfig 开启、该应用启用了自动故障转移、且
+        // session_id 来自客户端稳定标识（非临时生成的 UUID）时，才会按会话绑定起点；
+        // 否则 `select_providers_for_session` 内部退化为 `select_providers`，零回归。
         let providers = state
             .provider_router
-            .select_providers(app_type_str)
+            .select_providers_for_session(app_type_str, &session_id, session_client_provided)
             .await
             .map_err(|e| match e {
                 crate::error::AppError::AllProvidersCircuitOpen => {

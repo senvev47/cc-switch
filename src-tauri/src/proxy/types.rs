@@ -233,6 +233,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
+fn default_new_terminal_policy() -> String {
+    "reuse".to_string()
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -334,6 +342,45 @@ impl Default for CopilotOptimizerConfig {
             warmup_model: "gpt-5-mini".to_string(),
             strip_thinking: true,
         }
+    }
+}
+
+/// 按终端路由配置（Feature #2）
+///
+/// 存储在 settings 表中，key = "per_terminal_routing_config"
+///
+/// 默认关闭（`enabled = false`），开启后同一应用类型的多个终端会话各自绑定一条
+/// 独立的路由起点，而不是共享同一条 P1→P2→… 故障转移链。详见
+/// `ProviderRouter::select_providers_for_session`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerTerminalRoutingConfig {
+    /// 总开关（默认关闭）。关闭时 `select_providers_for_session` 直接退化为
+    /// `select_providers`，行为与历史版本完全一致，零回归风险。
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+    /// 新终端策略：`"reuse"`（默认，沿用全局队列起点 P1）或 `"rotate"`
+    /// （按已激活终端数轮转起点，使新终端尽量落在不同 provider 上）。
+    ///
+    /// 仅在 `enabled = true` 时生效。已存在的会话始终沿用其首次绑定的起点，
+    /// 不受该策略后续变更影响。
+    #[serde(default = "default_new_terminal_policy")]
+    pub new_terminal_policy: String,
+}
+
+impl Default for PerTerminalRoutingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            new_terminal_policy: "reuse".to_string(),
+        }
+    }
+}
+
+impl PerTerminalRoutingConfig {
+    /// 新终端策略是否为轮转模式
+    pub fn is_rotate_policy(&self) -> bool {
+        self.new_terminal_policy.eq_ignore_ascii_case("rotate")
     }
 }
 

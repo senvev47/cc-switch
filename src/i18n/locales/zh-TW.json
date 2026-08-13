@@ -421,6 +421,17 @@
           "debug": "詳細資訊，包含 SSE 串流與請求/回應詳情",
           "trace": "全部日誌，最詳細"
         }
+      },
+      "perTerminalRouting": {
+        "title": "按終端路由",
+        "description": "讓不同的 Codex 終端使用不同的故障轉移鏈起點",
+        "enabled": "啟用按終端路由",
+        "enabledDescription": "開啟後，每個終端（按 session_id 區分）會綁定各自的故障轉移鏈起點。需要該應用已啟用自動故障轉移，否則此功能不生效。",
+        "newTerminalPolicy": "新終端策略",
+        "newTerminalPolicyDescription": "新啟動的終端如何選擇故障轉移鏈起點",
+        "policyReuse": "沿用（從 P1 開始）",
+        "policyRotate": "輪轉（分散到不同供應商）",
+        "note": "每個終端僅故障轉移鏈起點不同——供應商列表、熔斷器狀態、故障轉移順序仍全域共享。關閉後恢復原本的共享起點行為，對現有流量零影響。"
       }
     },
     "language": "介面語言",

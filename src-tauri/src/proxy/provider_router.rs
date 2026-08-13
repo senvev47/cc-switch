@@ -12,12 +12,31 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// 单个会话绑定的路由起点信息（Feature #2：按终端路由）
+///
+/// 一旦某个终端会话首次绑定了一条 P1→P2→… 起点偏移，后续该会话的所有请求
+/// 都沿用同一偏移，使「一个终端 = 一套路由链」成立。绑定仅当故障转移队列
+/// 长度变化（增删/重排 provider）时失效，触发下次请求重新派发。
+#[derive(Clone, Debug)]
+struct SessionRoute {
+    /// 绑定时故障转移队列的长度；与当前队列长度不一致则视为过期绑定
+    queue_len_at_bind: usize,
+    /// 起点偏移：`ordered_ids[offset]` 为该会话的 P1
+    offset: usize,
+}
+
 /// 供应商路由器
 pub struct ProviderRouter {
     /// 数据库连接
     db: Arc<Database>,
     /// 熔断器管理器 - key 格式: "app_type:provider_id"
     circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
+    /// 按终端会话绑定的路由起点 - key 格式: "app_type:session_id"
+    ///
+    /// 仅在 `PerTerminalRoutingConfig.enabled = true` 且该应用开启了自动故障转移
+    /// 时被读写；其它情况下此 map 保持为空（`select_providers_for_session`
+    /// 会直接退化为 `select_providers`），零回归。
+    session_routes: Arc<RwLock<HashMap<String, SessionRoute>>>,
 }
 
 impl ProviderRouter {
@@ -26,6 +45,7 @@ impl ProviderRouter {
         Self {
             db,
             circuit_breakers: Arc::new(RwLock::new(HashMap::new())),
+            session_routes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -106,6 +126,184 @@ impl ProviderRouter {
         }
 
         Ok(result)
+    }
+
+    /// 按会话选择可用的供应商（Feature #2：按终端路由）
+    ///
+    /// 当满足以下全部条件时，按「会话绑定的起点偏移」对 `ordered_ids` 做轮转，
+    /// 使不同终端会话各自从不同 provider 起步：
+    ///   1. `PerTerminalRoutingConfig.enabled = true`；
+    ///   2. 该应用开启了自动故障转移（关闭时本函数直接退化为 `select_providers`，
+    ///      与历史版本行为完全一致）；
+    ///   3. `client_provided = true`（调用方确认本次 `session_id` 来自客户端稳定标识，
+    ///      而非 `extract_session_id` 生成的临时 UUID）。
+    ///
+    /// 第 3 条是内存安全阀：缺失稳定会话标识的请求会拿到一个一次性 UUID，
+    /// 若也写入 `session_routes` 则每条请求都新增一条永不清除的条目（`clear_*`
+    /// 驱逐函数未接线）。一次性 UUID 没有终端连续性，按终端路由对它无意义，
+    /// 因此这类请求一律退化为全局 `select_providers`，零回归且不泄漏。
+    ///
+    /// 起点（offset）的绑定规则：
+    ///   - 首次见到该会话：若策略为 `rotate`，offset = 当前已绑定会话数（模队列长度），
+    ///     使新终端尽量落在下一个 provider；策略为 `reuse`（默认）时 offset = 0，
+    ///     即沿用全局队列起点 P1。
+    ///   - 已绑定且队列长度未变：复用原 offset。
+    ///   - 队列长度发生变化（增删/重排 provider）：旧绑定失效，按「首次见到」重新派发。
+    ///
+    /// 关键不变量：轮转只改变起点，**不改变** provider 集合，也**不改变**熔断器 key
+    /// （始终为 `app_type:provider_id`），因此熔断器状态、健康统计、故障转移语义
+    /// 与 `select_providers` 完全一致，仅 P1→P2→… 的起跑线因会话而异。
+    pub async fn select_providers_for_session(
+        &self,
+        app_type: &str,
+        session_id: &str,
+        client_provided: bool,
+    ) -> Result<Vec<Provider>, AppError> {
+        // 1. 读取按终端路由配置；失败或关闭时直接退化为全局选择，零回归。
+        let routing_config = self.db.get_per_terminal_routing_config().unwrap_or_default();
+        if !routing_config.enabled {
+            return self.select_providers(app_type).await;
+        }
+
+        // 2. 自动故障转移关闭时同样退化为全局选择 —— 单 provider 无需轮转，
+        //    也避免在故障转移关闭路径里意外写入会话绑定。
+        let auto_failover_enabled = match self.db.get_proxy_config_for_app(app_type).await {
+            Ok(config) => config.auto_failover_enabled,
+            Err(e) => {
+                log::error!("[{app_type}] 读取 proxy_config 失败: {e}，禁用按终端路由");
+                return self.select_providers(app_type).await;
+            }
+        };
+        if !auto_failover_enabled {
+            return self.select_providers(app_type).await;
+        }
+
+        // 3. 缺失稳定会话标识（一次性 UUID）时退化为全局选择，避免内存泄漏：
+        //    见函数文档第 3 条不变量。这类请求没有终端连续性，无需绑定起点。
+        if !client_provided {
+            return self.select_providers(app_type).await;
+        }
+
+        // 3. 取全局有序 id（与 select_providers 同源，确保 provider 集合与熔断器 key 一致）。
+        let all_providers = self.db.get_all_providers(app_type)?;
+        let ordered_ids: Vec<String> = self
+            .db
+            .get_failover_queue(app_type)?
+            .into_iter()
+            .map(|item| item.provider_id)
+            .collect();
+
+        let queue_len = ordered_ids.len();
+        if queue_len == 0 {
+            log::warn!("[{app_type}] [FO-005] 未配置供应商（按终端路由）");
+            return Err(AppError::NoProvidersConfigured);
+        }
+
+        // 4. 解析 / 绑定该会话的起点偏移。
+        let session_key = format!("{app_type}:{session_id}");
+        let offset: Option<usize> = {
+            let routes = self.session_routes.read().await;
+            match routes.get(&session_key) {
+                Some(route) if route.queue_len_at_bind == queue_len => Some(route.offset),
+                _ => None,
+            }
+        };
+
+        let offset = match offset {
+            Some(off) => off,
+            None => {
+                // 首次见到该会话（或队列长度变化导致旧绑定失效）：派发新 offset。
+                let new_offset = if routing_config.is_rotate_policy() {
+                    // rotate：按当前已绑定会话数轮转，使新终端尽量落在不同 provider。
+                    let routes = self.session_routes.read().await;
+                    let count = routes
+                        .keys()
+                        .filter(|k| k.split_once(':').map(|(a, _)| a) == Some(app_type))
+                        .count();
+                    if queue_len == 0 {
+                        0
+                    } else {
+                        count % queue_len
+                    }
+                } else {
+                    // reuse（默认）：新终端沿用全局起点 P1。
+                    0
+                };
+
+                let bound_provider = ordered_ids.get(new_offset).cloned().unwrap_or_default();
+                {
+                    let mut routes = self.session_routes.write().await;
+                    routes.insert(
+                        session_key.clone(),
+                        SessionRoute {
+                            queue_len_at_bind: queue_len,
+                            offset: new_offset,
+                        },
+                    );
+                }
+                log::info!(
+                    "[{app_type}] 按终端路由：会话 {session_id} 绑定起点 P1 = {} (queue_len={})",
+                    bound_provider,
+                    queue_len
+                );
+                new_offset
+            }
+        };
+
+        // 5. 按 offset 轮转 ordered_ids，再走与 select_providers 完全一致的熔断器过滤。
+        let rotated: Vec<String> = (0..queue_len)
+            .map(|i| ordered_ids[(i + offset) % queue_len].clone())
+            .collect();
+
+        let mut result = Vec::new();
+        let mut circuit_open_count = 0usize;
+
+        for provider_id in &rotated {
+            let Some(provider) = all_providers.get(provider_id).cloned() else {
+                continue;
+            };
+            let circuit_key = format!("{app_type}:{}", provider.id);
+            let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+            if breaker.is_available().await {
+                result.push(provider);
+            } else {
+                circuit_open_count += 1;
+            }
+        }
+
+        if result.is_empty() {
+            if circuit_open_count == queue_len {
+                log::warn!("[{app_type}] [FO-004] 所有供应商均已熔断（按终端路由）");
+                return Err(AppError::AllProvidersCircuitOpen);
+            } else {
+                log::warn!("[{app_type}] [FO-005] 未配置供应商（按终端路由）");
+                return Err(AppError::NoProvidersConfigured);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// 清除指定会话的路由绑定（会话结束时调用，避免内存无限增长）。
+    ///
+    /// 未找到时静默返回；非关键路径，不返回错误。
+    pub async fn clear_session_route(&self, app_type: &str, session_id: &str) {
+        let session_key = format!("{app_type}:{session_id}");
+        let mut routes = self.session_routes.write().await;
+        routes.remove(&session_key);
+    }
+
+    /// 清除指定应用下所有会话的路由绑定（配置/队列变更时调用）。
+    pub async fn clear_app_session_routes(&self, app_type: &str) {
+        let prefix = format!("{app_type}:");
+        let mut routes = self.session_routes.write().await;
+        routes.retain(|k, _| !k.starts_with(&prefix));
+    }
+
+    /// 清除全部应用的会话路由绑定（关闭按终端路由时调用）。
+    pub async fn clear_all_session_routes(&self) {
+        let mut routes = self.session_routes.write().await;
+        routes.clear();
     }
 
     /// 请求执行前获取熔断器“放行许可”

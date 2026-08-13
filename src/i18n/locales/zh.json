@@ -421,6 +421,17 @@
           "debug": "详细信息，包含 SSE 流和请求/响应详情",
           "trace": "全部日志，最详细"
         }
+      },
+      "perTerminalRouting": {
+        "title": "按终端路由",
+        "description": "让不同的 Codex 终端使用不同的故障转移链起点",
+        "enabled": "启用按终端路由",
+        "enabledDescription": "开启后，每个终端（按 session_id 区分）会绑定各自的故障转移链起点。需要该应用已启用自动故障转移，否则此功能不生效。",
+        "newTerminalPolicy": "新终端策略",
+        "newTerminalPolicyDescription": "新启动的终端如何选择故障转移链起点",
+        "policyReuse": "沿用（从 P1 开始）",
+        "policyRotate": "轮转（分散到不同供应商）",
+        "note": "每个终端仅故障转移链起点不同——供应商列表、熔断器状态、故障转移顺序仍全局共享。关闭后恢复原本的共享起点行为，对现有流量零影响。"
       }
     },
     "language": "界面语言",

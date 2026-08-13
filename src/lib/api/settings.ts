@@ -299,6 +299,16 @@ export const settingsApi = {
   async setLogConfig(config: LogConfig): Promise<boolean> {
     return await invoke("set_log_config", { config });
   },
+
+  async getPerTerminalRoutingConfig(): Promise<PerTerminalRoutingConfig> {
+    return await invoke("get_per_terminal_routing_config");
+  },
+
+  async setPerTerminalRoutingConfig(
+    config: PerTerminalRoutingConfig,
+  ): Promise<boolean> {
+    return await invoke("set_per_terminal_routing_config", { config });
+  },
 };
 
 /** 单处工具安装的诊断信息（多处安装冲突检测）。字段对应后端 ToolInstallation。 */
@@ -338,6 +348,13 @@ export interface OptimizerConfig {
 export interface LogConfig {
   enabled: boolean;
   level: "error" | "warn" | "info" | "debug" | "trace";
+}
+
+/** 按终端路由配置（Feature #2）。字段对应后端 PerTerminalRoutingConfig。 */
+export interface PerTerminalRoutingConfig {
+  enabled: boolean;
+  /** 新终端策略："reuse"（沿用全局起点 P1）或 "rotate"（轮转起点） */
+  newTerminalPolicy: string;
 }
 
 export interface BackupEntry {

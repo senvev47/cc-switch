@@ -774,3 +774,42 @@ pub async fn set_log_config(
     );
     Ok(true)
 }
+
+/// 获取按终端路由配置（Feature #2）
+#[tauri::command]
+pub async fn get_per_terminal_routing_config(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::proxy::types::PerTerminalRoutingConfig, String> {
+    state
+        .db
+        .get_per_terminal_routing_config()
+        .map_err(|e| e.to_string())
+}
+
+/// 设置按终端路由配置（Feature #2）
+///
+/// 开启后，同一应用类型的多个终端会话各自绑定一条独立的故障转移链起点；
+/// 关闭时所有会话共享同一条链，行为与历史版本一致。
+#[tauri::command]
+pub async fn set_per_terminal_routing_config(
+    state: tauri::State<'_, crate::AppState>,
+    config: crate::proxy::types::PerTerminalRoutingConfig,
+) -> Result<bool, String> {
+    state
+        .db
+        .set_per_terminal_routing_config(&config)
+        .map_err(|e| e.to_string())?;
+    log::info!(
+        "按终端路由配置已更新: enabled={}, new_terminal_policy={}",
+        config.enabled,
+        config.new_terminal_policy
+    );
+    // 关闭总开关时立即清空已绑定的会话路由，避免内存残留。
+    // 开启/切换策略时无需清理：已绑定会话始终沿用其首次起点，新会话按新策略派发。
+    if !config.enabled {
+        if let Err(e) = state.proxy_service.clear_all_session_routes().await {
+            log::warn!("清除按终端会话路由绑定失败（非致命）: {e}");
+        }
+    }
+    Ok(true)
+}

@@ -495,6 +495,7 @@ impl RequestForwarder {
                     &headers,
                     &extensions,
                     adapter.as_ref(),
+                    has_failover_candidates,
                 )
                 .await
             {
@@ -594,6 +595,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    has_failover_candidates,
                                 )
                                 .await
                             {
@@ -741,6 +743,7 @@ impl RequestForwarder {
                                         &headers,
                                         &extensions,
                                         adapter.as_ref(),
+                                        has_failover_candidates,
                                     )
                                     .await
                                 {
@@ -908,6 +911,7 @@ impl RequestForwarder {
                                     &headers,
                                     &extensions,
                                     adapter.as_ref(),
+                                    has_failover_candidates,
                                 )
                                 .await
                             {
@@ -1134,6 +1138,7 @@ impl RequestForwarder {
         headers: &axum::http::HeaderMap,
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
+        has_failover_candidates: bool,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
         // 使用适配器提取 base_url
         let mut base_url = adapter.extract_base_url(provider)?;
@@ -2297,6 +2302,33 @@ impl RequestForwarder {
                 response = self
                     .validate_codex_anthropic_success_response(response)
                     .await?;
+            } else if codex_responses_to_anthropic
+                && has_failover_candidates
+                && request_is_streaming
+                && !response.is_json()
+            {
+                // Codex→Anthropic 流式:首包只等到字节就提交了,无法在 failover 循环内拦截
+                // 上游 2xx 后紧跟的 SSE error 事件。开启故障转移时,延迟提交直到看到生产性
+                // 输出或一个非失败的终态事件;失败事件仍在提交前返回 Err 触发下一家。
+                response = self
+                    .validate_codex_anthropic_stream_start(response)
+                    .await?;
+            } else if codex_responses_to_chat && (!request_is_streaming || response.is_json()) {
+                // Codex→Chat 上游也可能在 HTTP 2xx 内携带 OpenAI 风格错误信封
+                // (429/余额/预扣费等被网关转成 200)。仅在开启故障转移时校验,避免对
+                // 单 provider 模式造成「错误体被吞成 503」的回归。
+                response = self
+                    .validate_codex_chat_success_response(response)
+                    .await?;
+            } else if codex_responses_to_chat
+                && has_failover_candidates
+                && request_is_streaming
+                && !response.is_json()
+            {
+                // Codex→Chat 流式:上游 SSE 首个事件若是 error/携带 error 字段,
+                // 现有转换器会把它直接转成 response.failed 提交给客户端,丢失 failover 机会。
+                // 开启故障转移时先 prime 到看到生产性输出或终态失败再提交。
+                response = self.validate_codex_chat_stream_start(response).await?;
             } else if matches!(
                 resolved_claude_api_format.as_deref(),
                 Some("openai_responses")
@@ -2498,6 +2530,200 @@ impl RequestForwarder {
             if replay_chunks.iter().map(Bytes::len).sum::<usize>() >= MAX_PRIME_BYTES {
                 log::warn!(
                     "[Claude/Responses] semantic stream priming exceeded {MAX_PRIME_BYTES} bytes; committing buffered stream"
+                );
+                let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                return Ok(ProxyResponse::streamed(status, headers, replay));
+            }
+        }
+    }
+
+    /// Codex→Chat 非流式 / JSON 2xx 校验:OpenAI 风格错误信封
+    /// ({"error":{...}}) 在 HTTP 200 下也会出现(429/余额/预扣费被网关转 200)。
+    /// 仅在开启故障转移时由调用方触发,否则保持原透传行为。
+    async fn validate_codex_chat_success_response(
+        &self,
+        response: ProxyResponse,
+    ) -> Result<ProxyResponse, ProxyError> {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let encoding = get_content_encoding(&headers);
+        let raw = response.bytes().await?;
+        let decoded = match encoding {
+            Some(encoding) => match decompress_body(&encoding, &raw) {
+                Ok(Some(decompressed)) => decompressed,
+                _ => raw.to_vec(),
+            },
+            None => raw.to_vec(),
+        };
+
+        if let Some(message) = chat_error_envelope_message(&decoded) {
+            return Err(ProxyError::TransformError(format!(
+                "Chat upstream returned a 2xx failure: {message}"
+            )));
+        }
+
+        Ok(ProxyResponse::buffered(status, headers, raw))
+    }
+
+    /// Codex→Chat 流式预提交校验:在向客户端提交流之前,先消费上游 SSE 直到看到
+    /// 生产性输出(任意 choices 增量)或一个终态失败事件(error 事件 / 携带 error
+    /// 字段的 chunk)。失败事件仍在提交前返回 Err,触发故障转移到下一家 provider。
+    async fn validate_codex_chat_stream_start(
+        &self,
+        response: ProxyResponse,
+    ) -> Result<ProxyResponse, ProxyError> {
+        const MAX_PRIME_BYTES: usize = 256 * 1024;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+        let mut stream = Box::pin(response.bytes_stream());
+        let mut replay_chunks: Vec<Bytes> = Vec::new();
+        let mut parse_buffer = String::new();
+        let mut utf8_remainder = Vec::new();
+
+        loop {
+            let next = if self.streaming_first_byte_timeout.is_zero() {
+                stream.next().await
+            } else {
+                tokio::time::timeout(self.streaming_first_byte_timeout, stream.next())
+                    .await
+                    .map_err(|_| {
+                        ProxyError::Timeout(format!(
+                            "Chat stream produced no semantic output within {}s",
+                            self.streaming_first_byte_timeout.as_secs()
+                        ))
+                    })?
+            };
+
+            let Some(chunk) = next else {
+                if let Some(outcome) = inspect_chat_json_document(&parse_buffer) {
+                    outcome?;
+                    let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok));
+                    return Ok(ProxyResponse::streamed(status, headers, replay));
+                }
+                if !parse_buffer.trim().is_empty() {
+                    if let Some(outcome) = inspect_chat_sse_start_event(parse_buffer.trim()) {
+                        outcome?;
+                        let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok));
+                        return Ok(ProxyResponse::streamed(status, headers, replay));
+                    }
+                }
+                return Err(ProxyError::ForwardFailed(
+                    "Chat stream ended before producing output or a terminal event".to_string(),
+                ));
+            };
+            let chunk = chunk.map_err(|error| {
+                ProxyError::ForwardFailed(format!(
+                    "Failed while validating Chat stream start: {error}"
+                ))
+            })?;
+            crate::proxy::sse::append_utf8_safe(&mut parse_buffer, &mut utf8_remainder, &chunk);
+            replay_chunks.push(chunk);
+
+            // 兼容网关忽略 stream:true 直接返回完整 JSON 文档的情况。
+            if let Some(outcome) = inspect_chat_json_document(&parse_buffer) {
+                outcome?;
+                let replay =
+                    futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                return Ok(ProxyResponse::streamed(status, headers, replay));
+            }
+
+            while let Some(block) = crate::proxy::sse::take_sse_block(&mut parse_buffer) {
+                if let Some(outcome) = inspect_chat_sse_start_event(&block) {
+                    outcome?;
+                    let replay =
+                        futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                    return Ok(ProxyResponse::streamed(status, headers, replay));
+                }
+            }
+
+            if replay_chunks.iter().map(Bytes::len).sum::<usize>() >= MAX_PRIME_BYTES {
+                log::warn!(
+                    "[Codex/Chat] semantic stream priming exceeded {MAX_PRIME_BYTES} bytes; committing buffered stream"
+                );
+                let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                return Ok(ProxyResponse::streamed(status, headers, replay));
+            }
+        }
+    }
+
+    /// Codex→Anthropic 流式预提交校验:与 Chat 版本对称,但识别 Anthropic 风格
+    /// 的 error 事件(`event: error` + `{"type":"error","error":{...}}`)。在
+    /// 客户端看到任何字节前若捕获到首事件失败,仍可触发故障转移。
+    async fn validate_codex_anthropic_stream_start(
+        &self,
+        response: ProxyResponse,
+    ) -> Result<ProxyResponse, ProxyError> {
+        const MAX_PRIME_BYTES: usize = 256 * 1024;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+        let mut stream = Box::pin(response.bytes_stream());
+        let mut replay_chunks: Vec<Bytes> = Vec::new();
+        let mut parse_buffer = String::new();
+        let mut utf8_remainder = Vec::new();
+
+        loop {
+            let next = if self.streaming_first_byte_timeout.is_zero() {
+                stream.next().await
+            } else {
+                tokio::time::timeout(self.streaming_first_byte_timeout, stream.next())
+                    .await
+                    .map_err(|_| {
+                        ProxyError::Timeout(format!(
+                            "Anthropic stream produced no semantic output within {}s",
+                            self.streaming_first_byte_timeout.as_secs()
+                        ))
+                    })?
+            };
+
+            let Some(chunk) = next else {
+                if let Some(outcome) = inspect_codex_anthropic_json_document(&parse_buffer) {
+                    outcome?;
+                    let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok));
+                    return Ok(ProxyResponse::streamed(status, headers, replay));
+                }
+                if !parse_buffer.trim().is_empty() {
+                    if let Some(outcome) =
+                        inspect_codex_anthropic_sse_start_event(parse_buffer.trim())
+                    {
+                        outcome?;
+                        let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok));
+                        return Ok(ProxyResponse::streamed(status, headers, replay));
+                    }
+                }
+                return Err(ProxyError::ForwardFailed(
+                    "Anthropic stream ended before producing output or a terminal event"
+                        .to_string(),
+                ));
+            };
+            let chunk = chunk.map_err(|error| {
+                ProxyError::ForwardFailed(format!(
+                    "Failed while validating Anthropic stream start: {error}"
+                ))
+            })?;
+            crate::proxy::sse::append_utf8_safe(&mut parse_buffer, &mut utf8_remainder, &chunk);
+            replay_chunks.push(chunk);
+
+            if let Some(outcome) = inspect_codex_anthropic_json_document(&parse_buffer) {
+                outcome?;
+                let replay =
+                    futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                return Ok(ProxyResponse::streamed(status, headers, replay));
+            }
+
+            while let Some(block) = crate::proxy::sse::take_sse_block(&mut parse_buffer) {
+                if let Some(outcome) = inspect_codex_anthropic_sse_start_event(&block) {
+                    outcome?;
+                    let replay =
+                        futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
+                    return Ok(ProxyResponse::streamed(status, headers, replay));
+                }
+            }
+
+            if replay_chunks.iter().map(Bytes::len).sum::<usize>() >= MAX_PRIME_BYTES {
+                log::warn!(
+                    "[Codex/Anthropic] semantic stream priming exceeded {MAX_PRIME_BYTES} bytes; committing buffered stream"
                 );
                 let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
                 return Ok(ProxyResponse::streamed(status, headers, replay));
@@ -2971,6 +3197,32 @@ fn codex_anthropic_error_envelope_message(body: &[u8]) -> Option<String> {
     Some(format!("{error_type}: {message}"))
 }
 
+/// OpenAI Chat Completions 风格的错误信封:`{"error": {...}}` 或顶层数组里第一个
+/// 携带 error 的对象。合法的 chat completion 永远不会有顶层 `error` 字段,因此
+/// 使用 `!is_null()` 的严格判定:只有当确实存在一个非 null 的 error 对象时才视为失败。
+/// 这比转换器侧 `.is_some()` 的判定更严格,避免误伤正常响应导致终端被「吞错」。
+fn chat_error_envelope_message(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let error = value.get("error");
+    let has_error = error.is_some_and(|error| !error.is_null());
+    if !has_error {
+        return None;
+    }
+    let error = error.unwrap_or(&value);
+    let error_type = error
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("code").and_then(Value::as_str))
+        .unwrap_or("error");
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("Chat upstream failed before output");
+    Some(format!("{error_type}: {message}"))
+}
+
 fn responses_error_envelope_message(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let status = value.get("status").and_then(Value::as_str);
@@ -3025,6 +3277,154 @@ fn inspect_responses_json_document(buffer: &str) -> Option<Result<(), ProxyError
         ))));
     }
     Some(Ok(()))
+}
+
+/// 与 inspect_responses_json_document 对称:Chat 上游可能整段返回 JSON 而不标
+/// Content-Type。解析成功且包含非 null 的 `error` 字段时判定为 2xx 失败信封。
+fn inspect_chat_json_document(buffer: &str) -> Option<Result<(), ProxyError>> {
+    let trimmed = buffer.trim();
+    if !matches!(trimmed.as_bytes().first(), Some(b'{') | Some(b'[')) {
+        return None;
+    }
+    let _: Value = serde_json::from_str(trimmed).ok()?;
+    if let Some(message) = chat_error_envelope_message(trimmed.as_bytes()) {
+        return Some(Err(ProxyError::TransformError(format!(
+            "Chat upstream returned a 2xx failure: {message}"
+        ))));
+    }
+    Some(Ok(()))
+}
+
+/// 与 inspect_codex_anthropic_json_document 对称:Anthropic 上游可能整段返回
+/// JSON 错误对象而不标 Content-Type。复用既有的信封判定。
+fn inspect_codex_anthropic_json_document(buffer: &str) -> Option<Result<(), ProxyError>> {
+    let trimmed = buffer.trim();
+    if !matches!(trimmed.as_bytes().first(), Some(b'{') | Some(b'[')) {
+        return None;
+    }
+    let _: Value = serde_json::from_str(trimmed).ok()?;
+    if let Some(message) = codex_anthropic_error_envelope_message(trimmed.as_bytes()) {
+        return Some(Err(ProxyError::TransformError(format!(
+            "Anthropic upstream returned a 2xx error envelope: {message}"
+        ))));
+    }
+    Some(Ok(()))
+}
+
+/// Inspect one complete Chat SSE block while the response is still inside the
+/// retry loop. Mirrors inspect_responses_start_event but for OpenAI Chat shape:
+///   - `event: error` 行 → 失败
+///   - chunk 携带非 null 的顶层 `error` 字段 → 失败
+///   - 任意携带 `choices`/`delta`/`usage` 的生产性 chunk → 安全提交
+/// 其他生命周期事件返回 None 继续等待。
+fn inspect_chat_sse_start_event(block: &str) -> Option<Result<(), ProxyError>> {
+    let mut named_event = None;
+    let mut data_lines = Vec::new();
+    for line in block.lines() {
+        if let Some(event) = crate::proxy::sse::strip_sse_field(line, "event") {
+            named_event = Some(event.trim().to_string());
+        } else if let Some(data) = crate::proxy::sse::strip_sse_field(line, "data") {
+            data_lines.push(data);
+        }
+    }
+    if data_lines.is_empty() {
+        return None;
+    }
+    let value: Value = match serde_json::from_str(&data_lines.join("\n")) {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    let event = named_event
+        .as_deref()
+        .filter(|event| !event.is_empty())
+        .unwrap_or("");
+
+    if event == "error" || value.get("error").is_some_and(|error| !error.is_null()) {
+        let error = value.get("error").unwrap_or(&value);
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.as_str())
+            .unwrap_or("Chat upstream emitted an error before output");
+        let error_type = error
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| error.get("code").and_then(Value::as_str))
+            .unwrap_or("upstream_error");
+        return Some(Err(ProxyError::TransformError(format!(
+            "Chat upstream {error_type}: {message}"
+        ))));
+    }
+
+    // 生产性输出:任意带 choices/usage 的 chunk 视为安全提交。
+    // finish_reason 信号也在此列(转换器会在尾部补全 response.completed)。
+    if value.get("choices").is_some()
+        || value.get("usage").is_some()
+        || value.get("delta").is_some()
+    {
+        return Some(Ok(()));
+    }
+
+    None
+}
+
+/// Inspect one complete Anthropic SSE block while the response is still inside
+/// the retry loop. Mirrors inspect_chat_sse_start_event for Anthropic shape:
+///   - `event: error` 行 → 失败
+///   - 携带 `{"type":"error", ...}` 或非 null 的 `error` 字段 → 失败
+///   - 任意 `message_start`/`content_block_*`/`message_delta` 等生产性事件 → 安全提交
+fn inspect_codex_anthropic_sse_start_event(block: &str) -> Option<Result<(), ProxyError>> {
+    let mut named_event = None;
+    let mut data_lines = Vec::new();
+    for line in block.lines() {
+        if let Some(event) = crate::proxy::sse::strip_sse_field(line, "event") {
+            named_event = Some(event.trim().to_string());
+        } else if let Some(data) = crate::proxy::sse::strip_sse_field(line, "data") {
+            data_lines.push(data);
+        }
+    }
+    if data_lines.is_empty() {
+        return None;
+    }
+    let value: Value = match serde_json::from_str(&data_lines.join("\n")) {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    let event = named_event
+        .as_deref()
+        .filter(|event| !event.is_empty())
+        .unwrap_or("");
+
+    if event == "error"
+        || value.get("type").and_then(Value::as_str) == Some("error")
+        || value
+            .get("error")
+            .is_some_and(|error| !error.is_null())
+    {
+        let error = value.get("error").unwrap_or(&value);
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.as_str())
+            .unwrap_or("Anthropic upstream emitted an error before output");
+        let error_type = error
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| error.get("code").and_then(Value::as_str))
+            .unwrap_or("upstream_error");
+        return Some(Err(ProxyError::TransformError(format!(
+            "Anthropic upstream {error_type}: {message}"
+        ))));
+    }
+
+    // 生产性输出:message_start / content_block_* / message_delta / ping 等。
+    // 这些都是安全可以提交到客户端的早期事件。error 分支已在上方 if 提前返回。
+    match event {
+        "message_start" | "content_block_start" | "content_block_delta"
+        | "content_block_stop" | "message_delta" | "message_stop" | "ping" => Some(Ok(())),
+        "" => None,
+        _ => Some(Ok(())),
+    }
 }
 
 /// Inspect one complete Responses SSE block while the response is still inside

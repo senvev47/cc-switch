@@ -421,6 +421,17 @@
           "debug": "Detailed info including SSE stream and request/response",
           "trace": "All logs, most verbose"
         }
+      },
+      "perTerminalRouting": {
+        "title": "Per-Terminal Routing",
+        "description": "Let different Codex terminals use different failover-chain starting points",
+        "enabled": "Enable Per-Terminal Routing",
+        "enabledDescription": "When enabled, each terminal (identified by session_id) binds its own failover-chain starting point. Requires auto-failover to be enabled for the app; otherwise this has no effect.",
+        "newTerminalPolicy": "New Terminal Policy",
+        "newTerminalPolicyDescription": "How the starting point is chosen for a newly launched terminal",
+        "policyReuse": "Reuse (start from P1)",
+        "policyRotate": "Rotate (spread across providers)",
+        "note": "Only the starting point of the failover chain differs per terminal — the provider list, circuit-breaker state, and failover order stay shared. Turning this off restores the original shared-start behavior with zero change to existing traffic."
       }
     },
     "language": "Language",

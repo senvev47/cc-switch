@@ -3210,6 +3210,19 @@ impl ProxyService {
         }
         Ok(())
     }
+
+    /// 清除全部应用的按终端会话路由绑定（Feature #2）。
+    ///
+    /// 在关闭「按终端路由」总开关时调用：立即释放此前已绑定的会话起点，
+    /// 避免在进程生命周期内残留。仅在代理服务器正在运行时才有效；
+    /// 服务器未运行时无内存状态可清，直接返回。
+    pub async fn clear_all_session_routes(&self) -> Result<(), String> {
+        if let Some(server) = self.server.read().await.as_ref() {
+            server.clear_all_session_routes().await;
+            log::info!("已清除全部应用的按终端会话路由绑定");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

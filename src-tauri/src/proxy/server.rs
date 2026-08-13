@@ -402,4 +402,14 @@ impl ProxyServer {
             .reset_provider_breaker(provider_id, app_type)
             .await;
     }
+
+    /// 清除全部应用的按终端会话路由绑定（Feature #2）。
+    ///
+    /// 在关闭「按终端路由」总开关时调用，立即释放此前已绑定的会话起点，
+    /// 避免它们在进程生命周期内残留占内存。开关关闭后 `select_providers_for_session`
+    /// 会在第一步就退化为 `select_providers`，因此即使不调用也不会产生功能问题，
+    /// 此处仅为内存卫生。
+    pub async fn clear_all_session_routes(&self) {
+        self.state.provider_router.clear_all_session_routes().await;
+    }
 }

@@ -357,4 +357,29 @@ impl Database {
             .map_err(|e| AppError::Database(format!("序列化日志配置失败: {e}")))?;
         self.set_setting("log_config", &json)
     }
+
+    // --- 按终端路由配置 (Feature #2) ---
+
+    /// 获取按终端路由配置
+    ///
+    /// 返回配置，如果不存在则返回默认值（默认关闭）
+    pub fn get_per_terminal_routing_config(
+        &self,
+    ) -> Result<crate::proxy::types::PerTerminalRoutingConfig, AppError> {
+        match self.get_setting("per_terminal_routing_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析按终端路由配置失败: {e}"))),
+            None => Ok(crate::proxy::types::PerTerminalRoutingConfig::default()),
+        }
+    }
+
+    /// 更新按终端路由配置
+    pub fn set_per_terminal_routing_config(
+        &self,
+        config: &crate::proxy::types::PerTerminalRoutingConfig,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化按终端路由配置失败: {e}")))?;
+        self.set_setting("per_terminal_routing_config", &json)
+    }
 }

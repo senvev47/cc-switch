@@ -1350,6 +1350,8 @@ pub fn run() {
             commands::set_copilot_optimizer_config,
             commands::get_log_config,
             commands::set_log_config,
+            commands::get_per_terminal_routing_config,
+            commands::set_per_terminal_routing_config,
             commands::restart_app,
             commands::install_update_and_restart,
             commands::check_app_update_available,
