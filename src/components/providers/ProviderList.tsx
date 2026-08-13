@@ -111,7 +111,7 @@ interface ProviderListProps {
   isProxyRunning?: boolean; // 代理服务运行状态
   isProxyTakeover?: boolean; // 代理接管模式（Live配置已被接管）
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
-  onSetAsDefault?: (provider: Provider) => void; // OpenClaw: set as default model
+  onSetAsDefault?: (provider: Provider, modelId?: string) => void; // OpenClaw: set as default model
 }
 
 interface ProviderGroupView {
@@ -1675,7 +1675,9 @@ export function ProviderList({
             : isProviderDefaultModel(provider.id)
         }
         onSetAsDefault={
-          onSetAsDefault ? () => onSetAsDefault(provider) : undefined
+          onSetAsDefault
+            ? (modelId) => onSetAsDefault(provider, modelId)
+            : undefined
         }
         isGroupManageMode={isGroupManageMode}
         isSelected={selectedProviderIds.has(provider.id)}
@@ -1988,7 +1990,7 @@ interface SortableProviderCardProps {
   activeProviderId?: string;
   // OpenClaw: default model
   isDefaultModel?: boolean;
-  onSetAsDefault?: () => void;
+  onSetAsDefault?: (modelId?: string) => void;
   isGroupManageMode: boolean;
   isSelected: boolean;
   onToggleSelected: (checked: boolean) => void;

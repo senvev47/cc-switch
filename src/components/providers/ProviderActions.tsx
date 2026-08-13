@@ -2,6 +2,7 @@ import {
   Activity,
   BarChart3,
   Check,
+  ChevronDown,
   Copy,
   Edit,
   Loader2,
@@ -16,8 +17,20 @@ import {
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import type { AppId } from "@/lib/api";
+
+interface OpenClawDefaultModelOption {
+  id: string;
+  name?: string;
+}
 
 interface ProviderActionsProps {
   appId?: AppId;
@@ -44,7 +57,8 @@ interface ProviderActionsProps {
   isReadOnly?: boolean;
   // OpenClaw: default model
   isDefaultModel?: boolean;
-  onSetAsDefault?: () => void;
+  defaultModelOptions?: OpenClawDefaultModelOption[];
+  onSetAsDefault?: (modelId?: string) => void;
   isTestingModels?: boolean;
   groupMenu?: ReactNode;
 }
@@ -85,6 +99,7 @@ export function ProviderActions({
   isReadOnly = false,
   // OpenClaw: default model
   isDefaultModel = false,
+  defaultModelOptions = [],
   onSetAsDefault,
   isTestingModels = false,
   groupMenu,
@@ -248,18 +263,72 @@ export function ProviderActions({
             appId === "hermes"
               ? t("provider.enable", { defaultValue: "启用" })
               : t("provider.setAsDefault", { defaultValue: "设为默认" });
+          const defaultButtonClassName = cn(
+            "w-fit px-2.5",
+            isDefaultModel
+              ? "bg-gray-200 text-muted-foreground dark:bg-gray-700 opacity-60 cursor-not-allowed"
+              : "bg-blue-500 hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700",
+          );
+
+          if (
+            appId === "openclaw" &&
+            !isDefaultModel &&
+            defaultModelOptions.length > 1
+          ) {
+            return (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="default"
+                    className={defaultButtonClassName}
+                  >
+                    <Zap className="h-4 w-4" />
+                    {inactiveLabel}
+                    <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="end"
+                  className="max-h-72 min-w-64 overflow-y-auto"
+                >
+                  <DropdownMenuLabel>
+                    {t("openclaw.selectDefaultModel", {
+                      defaultValue: "选择默认模型",
+                    })}
+                  </DropdownMenuLabel>
+                  {defaultModelOptions.map((model) => (
+                    <DropdownMenuItem
+                      key={model.id}
+                      onSelect={() => onSetAsDefault(model.id)}
+                      className="flex min-w-0 flex-col items-start gap-0.5"
+                    >
+                      <span className="max-w-72 truncate">
+                        {model.name?.trim() || model.id}
+                      </span>
+                      {model.name?.trim() && model.name.trim() !== model.id && (
+                        <span className="max-w-72 truncate font-mono text-xs text-muted-foreground">
+                          {model.id}
+                        </span>
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            );
+          }
+
           return (
             <Button
               size="sm"
               variant={isDefaultModel ? "secondary" : "default"}
-              onClick={isDefaultModel ? undefined : onSetAsDefault}
-              disabled={isDefaultModel}
-              className={cn(
-                "w-fit px-2.5",
+              onClick={
                 isDefaultModel
-                  ? "bg-gray-200 text-muted-foreground dark:bg-gray-700 opacity-60 cursor-not-allowed"
-                  : "bg-blue-500 hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700",
-              )}
+                  ? undefined
+                  : () => onSetAsDefault(defaultModelOptions[0]?.id)
+              }
+              disabled={isDefaultModel}
+              className={defaultButtonClassName}
             >
               <Zap className="h-4 w-4" />
               {isDefaultModel ? activeLabel : inactiveLabel}
