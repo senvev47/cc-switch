@@ -387,7 +387,8 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
     {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::{
-            Foundation::ERROR_NOT_SUPPORTED, Storage::FileSystem::ReplaceFileW,
+            Foundation::{ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION},
+            Storage::FileSystem::ReplaceFileW,
         };
 
         let replaced: Vec<u16> = path
@@ -403,7 +404,14 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
         let mut completed = false;
         let mut last_error = None;
 
-        for _ in 0..3 {
+        // ReplaceFileW fails with ERROR_SHARING_VIOLATION (32) when another process holds
+        // the target open with an incompatible share mode — codex's `skills/list` config
+        // reload reads config.toml exactly this way during an auto-failover hot-switch.
+        // The read handle is released within milliseconds, so a short backoff retries past
+        // the transient collision instead of surfacing it to the caller as os error 32.
+        // 8 attempts keep total worst-case latency under ~230ms even under contention.
+        let mut sharing_delays: &[u64] = &[2, 4, 8, 16, 32, 64, 96];
+        for _ in 0..8 {
             // SAFETY: both path buffers are NUL-terminated UTF-16 and remain alive for the
             // duration of the call. Backup, exclusion, and reserved pointers are intentionally null.
             let replaced_ok = unsafe {
@@ -426,6 +434,24 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
             // std::fs::rename uses a different replace-existing API on Windows.
             let replace_not_supported =
                 replace_error.raw_os_error() == Some(ERROR_NOT_SUPPORTED as i32);
+            // The read/write share-mode collision while another process holds the target.
+            // Rust maps raw OS error 32 to ErrorKind::PermissionDenied, so guard on both.
+            let replace_sharing_violation =
+                replace_error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
+                    || replace_error.kind() == std::io::ErrorKind::PermissionDenied;
+
+            if replace_sharing_violation {
+                // Transient: codex's config-reload read handle releases within milliseconds.
+                // Back off briefly and retry ReplaceFileW before falling back to fs::rename,
+                // which would hit the same sharing violation on a held target.
+                if let Some(delay_ms) = sharing_delays.first().copied() {
+                    sharing_delays = &sharing_delays[1..];
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
+                last_error = Some(replace_error);
+                continue;
+            }
+
             if replace_error.kind() != std::io::ErrorKind::NotFound && !replace_not_supported {
                 last_error = Some(replace_error);
                 break;
@@ -526,6 +552,54 @@ mod tests {
         drop(held_file);
         assert_eq!(std::fs::read(&path).unwrap(), b"old contents");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_retries_past_transient_windows_sharing_violation() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::sync::mpsc;
+        use std::thread;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        // Models the production collision: a concurrent reader (codex `skills/list` config
+        // reload) holds config.toml open with FILE_SHARE_READ for a few milliseconds while
+        // an auto-failover hot-switch writes it. The holder releases mid-retry, so the
+        // widened backoff loop must ride out the transient ERROR_SHARING_VIOLATION and the
+        // write must succeed with correct contents and no leftover temp file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, b"old contents").unwrap();
+
+        let held_path = path.clone();
+        let (tx, rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let held_file = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(&held_path)
+                .unwrap();
+            tx.send(()).expect("notify holder acquired");
+            // Hold ~20ms (wall-clock): long enough that the first ReplaceFileW attempts land
+            // in the violation window, short enough to release well before the backoff budget
+            // is exhausted (attempt budget ~222ms; holder drops near the 2+4+8+16=30ms mark).
+            thread::sleep(std::time::Duration::from_millis(20));
+            drop(held_file);
+        });
+
+        rx.recv().expect("holder must acquire before write");
+        let result = atomic_write(&path, b"new contents");
+
+        holder.join().expect("holder thread panicked");
+        assert!(result.is_ok(), "atomic_write should ride out the transient holder: {result:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new contents");
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .count(),
+            1,
+            "no leftover temp file should remain"
+        );
     }
 
     #[cfg(windows)]
