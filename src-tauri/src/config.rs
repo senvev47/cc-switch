@@ -447,9 +447,12 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
                 break;
             }
 
+            // Capture raw code + kind before moving the error into last_error
+            // (io::Error is not Copy, so any later field access would borrow a moved value).
             let replace_error = std::io::Error::last_os_error();
-            last_error = Some(replace_error);
             let raw = replace_error.raw_os_error();
+            let replace_kind = replace_error.kind();
+            last_error = Some(replace_error);
             // ERROR_SHARING_VIOLATION (32): another process holds the target open with an
             // incompatible share mode (codex's config-reload read). Rust maps raw 32 to
             // ErrorKind::Uncategorized (NOT PermissionDenied — only ERROR_ACCESS_DENIED/5
@@ -457,7 +460,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
             let sharing_violation = raw == Some(ERROR_SHARING_VIOLATION as i32);
             // WSL UNC paths reject replace-existing with ERROR_NOT_SUPPORTED (50).
             let not_supported = raw == Some(ERROR_NOT_SUPPORTED as i32);
-            let not_found = replace_error.kind() == std::io::ErrorKind::NotFound;
+            let not_found = replace_kind == std::io::ErrorKind::NotFound;
 
             if sharing_violation {
                 if let Some(delay_ms) = sharing_delays.first().copied() {
@@ -479,9 +482,12 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
                         break;
                     }
                     Err(source) => {
+                        // Capture the retriable verdict before moving the error.
+                        let source_sharing =
+                            source.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32);
                         last_error = Some(source);
                         // A transient sharing violation from the fallback is still retriable.
-                        if source.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) {
+                        if source_sharing {
                             if let Some(delay_ms) = sharing_delays.first().copied() {
                                 sharing_delays = &sharing_delays[1..];
                                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
