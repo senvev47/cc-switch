@@ -388,93 +388,113 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::{
             Foundation::{ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION},
-            Storage::FileSystem::ReplaceFileW,
+            Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING},
         };
 
-        let replaced: Vec<u16> = path
+        // MoveFileExW(MOVEFILE_REPLACE_EXISTING) supersedes the destination at the
+        // directory-entry level. Unlike ReplaceFileW — which opened the existing target with
+        // GENERIC_READ|WRITE|DELETE|WRITE_DAC and held that handle across the call, keeping
+        // a restrictive share mode live for the duration of each attempt — MoveFileExW holds
+        // NO sustained userspace handle on the destination. The kernel opens, supersedes, and
+        // closes entirely within the syscall, so a concurrent codex `skills/list` config-reload
+        // read of config.toml can only collide with a sub-microsecond kernel-internal window
+        // instead of ReplaceFileW's tens-to-hundreds-of-microseconds sustained handle. This
+        // shrinks the writer-induced reader-denial window (and thus reader-side os error 32)
+        // by roughly three orders of magnitude. It is NOT a literal elimination: the source
+        // (temp) handle the kernel opens with DELETE access is bound to the destination FCB for
+        // a sub-microsecond epilogue after the directory-entry swap, and a fresh reader
+        // opening the target without FILE_SHARE_DELETE during that epilogue can still see a
+        // transient ERROR_SHARING_VIOLATION. True elimination would require codex to open
+        // config.toml with FILE_SHARE_DELETE, which cc-switch cannot change.
+        //
+        // Because MoveFileExW uses legacy (non-POSIX) supersede semantics, it still requires
+        // DELETE-share compatibility with any existing handle on the destination: a reader
+        // holding the target without FILE_SHARE_DELETE makes MoveFileExW itself return
+        // ERROR_SHARING_VIOLATION (32). codex's config-reload read handle releases within
+        // milliseconds, so a short backoff retries past the transient collision rather than
+        // surfacing it. WSL UNC paths reject the replace-existing move with
+        // ERROR_NOT_SUPPORTED (50); fall back to std::fs::rename there.
+        let source_path: Vec<u16> = tmp
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        let replacement: Vec<u16> = tmp
+        let target_path: Vec<u16> = path
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        let mut completed = false;
-        let mut last_error = None;
 
-        // ReplaceFileW fails with ERROR_SHARING_VIOLATION (32) when another process holds
-        // the target open with an incompatible share mode — codex's `skills/list` config
-        // reload reads config.toml exactly this way during an auto-failover hot-switch.
-        // The read handle is released within milliseconds, so a short backoff retries past
-        // the transient collision instead of surfacing it to the caller as os error 32.
-        // 8 attempts keep total worst-case latency under ~230ms even under contention.
         let mut sharing_delays: &[u64] = &[2, 4, 8, 16, 32, 64, 96];
+        let mut last_error: Option<std::io::Error> = None;
+        let mut completed = false;
+
+        // 8 attempts keep total worst-case latency under ~230ms even under contention.
         for _ in 0..8 {
             // SAFETY: both path buffers are NUL-terminated UTF-16 and remain alive for the
-            // duration of the call. Backup, exclusion, and reserved pointers are intentionally null.
-            let replaced_ok = unsafe {
-                ReplaceFileW(
-                    replaced.as_ptr(),
-                    replacement.as_ptr(),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
+            // duration of the call. MOVEFILE_REPLACE_EXISTING atomically supersedes an
+            // existing destination on the same volume; the temp and target share a parent,
+            // so they are on the same volume.
+            let moved = unsafe {
+                MoveFileExW(
+                    source_path.as_ptr(),
+                    target_path.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING,
                 )
             };
-            if replaced_ok != 0 {
+            if moved != 0 {
                 completed = true;
                 break;
             }
 
             let replace_error = std::io::Error::last_os_error();
-            // WSL UNC paths reject ReplaceFileW with ERROR_NOT_SUPPORTED (50).
-            // std::fs::rename uses a different replace-existing API on Windows.
-            let replace_not_supported =
-                replace_error.raw_os_error() == Some(ERROR_NOT_SUPPORTED as i32);
-            // The read/write share-mode collision while another process holds the target.
-            // Rust maps raw OS error 32 to ErrorKind::PermissionDenied, so guard on both.
-            let replace_sharing_violation =
-                replace_error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
-                    || replace_error.kind() == std::io::ErrorKind::PermissionDenied;
+            last_error = Some(replace_error);
+            let raw = replace_error.raw_os_error();
+            // ERROR_SHARING_VIOLATION (32): another process holds the target open with an
+            // incompatible share mode (codex's config-reload read). Rust maps raw 32 to
+            // ErrorKind::Uncategorized (NOT PermissionDenied — only ERROR_ACCESS_DENIED/5
+            // maps to PermissionDenied), so guard on the raw OS code, not the kind.
+            let sharing_violation = raw == Some(ERROR_SHARING_VIOLATION as i32);
+            // WSL UNC paths reject replace-existing with ERROR_NOT_SUPPORTED (50).
+            let not_supported = raw == Some(ERROR_NOT_SUPPORTED as i32);
+            let not_found = replace_error.kind() == std::io::ErrorKind::NotFound;
 
-            if replace_sharing_violation {
-                // Transient: codex's config-reload read handle releases within milliseconds.
-                // Back off briefly and retry ReplaceFileW before falling back to fs::rename,
-                // which would hit the same sharing violation on a held target.
+            if sharing_violation {
                 if let Some(delay_ms) = sharing_delays.first().copied() {
                     sharing_delays = &sharing_delays[1..];
                     std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    continue;
                 }
-                last_error = Some(replace_error);
-                continue;
-            }
-
-            if replace_error.kind() != std::io::ErrorKind::NotFound && !replace_not_supported {
-                last_error = Some(replace_error);
+                // Backoff exhausted: a non-releasing holder keeps the target locked. Leave
+                // the destination untouched and surface the failure.
                 break;
             }
 
-            match fs::rename(&tmp, path) {
-                Ok(()) => {
-                    completed = true;
-                    break;
-                }
-                Err(source)
-                    if matches!(
-                        source.kind(),
-                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
-                    ) =>
-                {
-                    last_error = Some(source);
-                }
-                Err(source) => {
-                    last_error = Some(source);
-                    break;
+            if not_supported || not_found {
+                // Fall back to std::fs::rename, which uses a different replace-existing
+                // code path that works on filesystems rejecting MoveFileExW's supersede.
+                match fs::rename(&tmp, path) {
+                    Ok(()) => {
+                        completed = true;
+                        break;
+                    }
+                    Err(source) => {
+                        last_error = Some(source);
+                        // A transient sharing violation from the fallback is still retriable.
+                        if source.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) {
+                            if let Some(delay_ms) = sharing_delays.first().copied() {
+                                sharing_delays = &sharing_delays[1..];
+                                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                                continue;
+                            }
+                        }
+                        break;
+                    }
                 }
             }
+
+            // Any other error is non-transient: stop and surface it.
+            break;
         }
 
         if !completed {
@@ -580,7 +600,7 @@ mod tests {
                 .open(&held_path)
                 .unwrap();
             tx.send(()).expect("notify holder acquired");
-            // Hold ~20ms (wall-clock): long enough that the first ReplaceFileW attempts land
+            // Hold ~20ms (wall-clock): long enough that the first MoveFileExW attempts land
             // in the violation window, short enough to release well before the backoff budget
             // is exhausted (attempt budget ~222ms; holder drops near the 2+4+8+16=30ms mark).
             thread::sleep(std::time::Duration::from_millis(20));
