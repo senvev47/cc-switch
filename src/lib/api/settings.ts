@@ -353,8 +353,9 @@ export interface LogConfig {
 /** 按终端路由配置（Feature #2）。字段对应后端 PerTerminalRoutingConfig。 */
 export interface PerTerminalRoutingConfig {
   enabled: boolean;
-  /** 新终端策略："reuse"（沿用全局起点 P1）或 "rotate"（轮转起点） */
-  newTerminalPolicy: string;
+  /** 预设「下一个新终端」绑定的命名档案 id；null/undefined = 默认共享队列。
+   *  消费后由后端立即清回 null（一次性预设）。 */
+  nextNewTerminalProfileId?: string | null;
 }
 
 export interface BackupEntry {

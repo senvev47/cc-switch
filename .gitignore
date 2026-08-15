@@ -38,3 +38,8 @@ copilot-api
 .history
 CODEBUDDY.md
 mainWindow.js
+
+# Local tooling / scratch
+.serena/
+.artifacts/
+.diff_*.txt

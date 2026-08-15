@@ -9,7 +9,8 @@
  * FailoverQueueManager 管理；此处只管理命名档案。
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -45,6 +46,7 @@ import {
   useReorderFailoverProfileMembers,
 } from "@/lib/query/failoverProfiles";
 import { useAvailableProvidersForFailover } from "@/lib/query/failover";
+import { settingsApi, type PerTerminalRoutingConfig } from "@/lib/api/settings";
 
 interface FailoverProfilesPanelProps {
   appType: AppId;
@@ -56,11 +58,16 @@ export function FailoverProfilesPanel({
   disabled = false,
 }: FailoverProfilesPanelProps) {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [newProfileName, setNewProfileName] = useState("");
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [routingConfig, setRoutingConfig] = useState<PerTerminalRoutingConfig | null>(
+    null,
+  );
+  const [savingPreset, setSavingPreset] = useState(false);
 
   const { data: profiles, isLoading: profilesLoading } =
     useFailoverProfiles(appType);
@@ -68,6 +75,46 @@ export function FailoverProfilesPanel({
     () => (profiles ?? []).filter((p) => !!p.profileId),
     [profiles],
   );
+
+  // 加载按终端路由配置（用于「下一个新终端使用哪个档案」预设）。
+  useEffect(() => {
+    settingsApi
+      .getPerTerminalRoutingConfig()
+      .then(setRoutingConfig)
+      .catch((e) => console.error("Failed to load routing config:", e));
+  }, []);
+
+  const handleSetNextProfile = async (profileId: string | null) => {
+    if (!routingConfig) return;
+    const next: PerTerminalRoutingConfig = {
+      ...routingConfig,
+      nextNewTerminalProfileId: profileId,
+    };
+    setSavingPreset(true);
+    try {
+      await settingsApi.setPerTerminalRoutingConfig(next);
+      setRoutingConfig(next);
+      queryClient.invalidateQueries({ queryKey: ["perTerminalRoutingConfig"] });
+      toast.success(
+        profileId
+          ? t(
+              "proxy.failoverProfiles.presetSet",
+              "已设为下一个新终端的档案（仅生效一次）",
+            )
+          : t(
+              "proxy.failoverProfiles.presetCleared",
+              "已清除预设，下一个新终端将走默认共享队列",
+            ),
+        { closeButton: true },
+      );
+    } catch (e) {
+      toast.error(
+        t("proxy.failoverProfiles.presetFailed", "设置预设失败") + ": " + String(e),
+      );
+    } finally {
+      setSavingPreset(false);
+    }
+  };
 
   // 自动选中第一个档案（若尚未选中）。
   const effectiveActive =
@@ -224,6 +271,58 @@ export function FailoverProfilesPanel({
           )}
         </AlertDescription>
       </Alert>
+
+      {/* 下一个新终端的档案预设（一次性） */}
+      {routingConfig?.enabled && (
+        <div className="rounded-lg border border-violet-500/40 bg-violet-500/5 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="space-y-0.5 min-w-0">
+              <span className="text-sm font-medium">
+                {t(
+                  "proxy.failoverProfiles.nextNewTerminal",
+                  "下一个新终端使用",
+                )}
+              </span>
+              <p className="text-xs text-muted-foreground">
+                {t(
+                  "proxy.failoverProfiles.nextNewTerminalHint",
+                  "设好后，下一个新接入的终端会绑定到该档案，绑定后预设自动清回默认。",
+                )}
+              </p>
+            </div>
+            <Select
+              value={
+                routingConfig.nextNewTerminalProfileId
+                  ? routingConfig.nextNewTerminalProfileId
+                  : "__default__"
+              }
+              onValueChange={(v) =>
+                handleSetNextProfile(v === "__default__" ? null : v)
+              }
+              disabled={
+                disabled || savingPreset || namedProfiles.length === 0
+              }
+            >
+              <SelectTrigger className="w-[180px] shrink-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__default__">
+                  {t(
+                    "proxy.failoverProfiles.useDefaultQueue",
+                    "默认共享队列",
+                  )}
+                </SelectItem>
+                {namedProfiles.map((p) => (
+                  <SelectItem key={p.profileId} value={p.profileId!}>
+                    {p.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      )}
 
       {/* 创建档案 */}
       <div className="flex items-center gap-2">

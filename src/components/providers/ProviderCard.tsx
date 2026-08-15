@@ -68,6 +68,10 @@ interface ProviderCardProps {
   failoverPriority?: number; // 故障转移优先级（1 = P1, 2 = P2, ...）
   isInFailoverQueue?: boolean; // 是否在故障转移队列中
   onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
+  /** 命名故障转移档案（存在时，卡片"加入"按钮变为双选下拉）。 */
+  namedFailoverProfiles?: { profileId: string; name: string }[];
+  /** 将本 provider 加入命名档案。 */
+  onAddToNamedProfile?: (profileId: string) => void;
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
   // OpenClaw: default model
   isDefaultModel?: boolean;
@@ -171,6 +175,8 @@ export function ProviderCard({
   failoverPriority,
   isInFailoverQueue = false,
   onToggleFailover,
+  namedFailoverProfiles,
+  onAddToNamedProfile,
   activeProviderId,
   // OpenClaw: default model
   isDefaultModel,
@@ -627,6 +633,8 @@ export function ProviderCard({
               isAutoFailoverEnabled={isAutoFailoverEnabled}
               isInFailoverQueue={isInFailoverQueue}
               onToggleFailover={onToggleFailover}
+              namedFailoverProfiles={namedFailoverProfiles}
+              onAddToNamedProfile={onAddToNamedProfile}
               // OpenClaw: default model
               isDefaultModel={isDefaultModel}
               defaultModelOptions={openclawDefaultModelOptions}

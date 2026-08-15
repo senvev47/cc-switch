@@ -22,6 +22,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
@@ -52,6 +53,10 @@ interface ProviderActionsProps {
   isAutoFailoverEnabled?: boolean;
   isInFailoverQueue?: boolean;
   onToggleFailover?: (enabled: boolean) => void;
+  /** 命名故障转移档案（仅当存在时，"加入"按钮变为双选下拉）。 */
+  namedFailoverProfiles?: { profileId: string; name: string }[];
+  /** 将本 provider 加入命名档案。 */
+  onAddToNamedProfile?: (profileId: string) => void;
   isOfficialBlockedByProxy?: boolean;
   // Hermes v12+ providers: dict overlay — edit/delete must go through Web UI
   isReadOnly?: boolean;
@@ -95,6 +100,8 @@ export function ProviderActions({
   isAutoFailoverEnabled = false,
   isInFailoverQueue = false,
   onToggleFailover,
+  namedFailoverProfiles = [],
+  onAddToNamedProfile,
   isOfficialBlockedByProxy = false,
   isReadOnly = false,
   // OpenClaw: default model
@@ -345,16 +352,54 @@ export function ProviderActions({
           buttonState.disabled && "cursor-not-allowed",
         )}
       >
-        <Button
-          size="sm"
-          variant={buttonState.variant}
-          onClick={handleMainButtonClick}
-          disabled={buttonState.disabled}
-          className={cn("w-[4.5rem] px-2.5", buttonState.className)}
-        >
-          {buttonState.icon}
-          {buttonState.text}
-        </Button>
+        {isFailoverMode &&
+        !isInFailoverQueue &&
+        namedFailoverProfiles.length > 0 &&
+        onAddToNamedProfile ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="sm"
+                variant={buttonState.variant}
+                className={cn("w-[4.5rem] px-2.5", buttonState.className)}
+              >
+                {buttonState.icon}
+                {buttonState.text}
+                <ChevronDown className="h-3 w-3 opacity-70" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-56">
+              <DropdownMenuLabel>
+                {t("failover.addToWhere", { defaultValue: "加入哪个故障转移列表" })}
+              </DropdownMenuLabel>
+              <DropdownMenuItem
+                onClick={() => onToggleFailover?.(true)}
+              >
+                {t("failover.defaultQueue", { defaultValue: "默认共享队列" })}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {namedFailoverProfiles.map((p) => (
+                <DropdownMenuItem
+                  key={p.profileId}
+                  onClick={() => onAddToNamedProfile(p.profileId)}
+                >
+                  {p.name}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : (
+          <Button
+            size="sm"
+            variant={buttonState.variant}
+            onClick={handleMainButtonClick}
+            disabled={buttonState.disabled}
+            className={cn("w-[4.5rem] px-2.5", buttonState.className)}
+          >
+            {buttonState.icon}
+            {buttonState.text}
+          </Button>
+        )}
       </span>
 
       <div className="flex items-center gap-1">

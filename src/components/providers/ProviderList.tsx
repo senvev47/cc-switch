@@ -70,6 +70,10 @@ import {
   useRemoveFromFailoverQueue,
 } from "@/lib/query/failover";
 import {
+  useFailoverProfiles,
+  useAddProviderToFailoverProfile,
+} from "@/lib/query/failoverProfiles";
+import {
   useCurrentOmoProviderId,
   useCurrentOmoSlimProviderId,
 } from "@/lib/query/omo";
@@ -341,9 +345,42 @@ export function ProviderList({
   const { data: failoverQueue } = useFailoverQueue(appId);
   const addToQueue = useAddToFailoverQueue();
   const removeFromQueue = useRemoveFromFailoverQueue();
+  const { data: failoverProfilesData } = useFailoverProfiles(appId);
+  const addProviderToProfile = useAddProviderToFailoverProfile();
+  const namedFailoverProfiles = useMemo(
+    () =>
+      (failoverProfilesData ?? [])
+        .filter((p) => !!p.profileId)
+        .map((p) => ({ profileId: p.profileId!, name: p.name })),
+    [failoverProfilesData],
+  );
   const [groupFailoverActionId, setGroupFailoverActionId] = useState<
     string | null
   >(null);
+
+  const handleAddToNamedProfile = useCallback(
+    (providerId: string, profileId: string) => {
+      addProviderToProfile.mutate(
+        { appType: appId, providerId, profileId },
+        {
+          onSuccess: () =>
+            toast.success(
+              t("failover.addedToProfile", { defaultValue: "已加入档案" }),
+              { closeButton: true },
+            ),
+          onError: (e) =>
+            toast.error(
+              t("failover.addToProfileFailed", {
+                defaultValue: "加入档案失败",
+              }) +
+                ": " +
+                String(e),
+            ),
+        },
+      );
+    },
+    [appId, addProviderToProfile, t],
+  );
 
   const isFailoverModeActive =
     isProxyTakeover === true && isAutoFailoverEnabled === true;
@@ -1668,6 +1705,10 @@ export function ProviderList({
         onToggleFailover={(enabled) =>
           handleToggleFailover(provider.id, enabled)
         }
+        namedFailoverProfiles={namedFailoverProfiles}
+        onAddToNamedProfile={(profileId) =>
+          handleAddToNamedProfile(provider.id, profileId)
+        }
         activeProviderId={activeProviderId}
         isDefaultModel={
           appId === "hermes"
@@ -1987,6 +2028,8 @@ interface SortableProviderCardProps {
   failoverPriority?: number;
   isInFailoverQueue: boolean;
   onToggleFailover: (enabled: boolean) => void;
+  namedFailoverProfiles?: { profileId: string; name: string }[];
+  onAddToNamedProfile?: (profileId: string) => void;
   activeProviderId?: string;
   // OpenClaw: default model
   isDefaultModel?: boolean;
@@ -2343,6 +2386,8 @@ function SortableProviderCard({
   failoverPriority,
   isInFailoverQueue,
   onToggleFailover,
+  namedFailoverProfiles,
+  onAddToNamedProfile,
   activeProviderId,
   isDefaultModel,
   onSetAsDefault,
@@ -2465,6 +2510,8 @@ function SortableProviderCard({
           failoverPriority={failoverPriority}
           isInFailoverQueue={isInFailoverQueue}
           onToggleFailover={onToggleFailover}
+          namedFailoverProfiles={namedFailoverProfiles}
+          onAddToNamedProfile={onAddToNamedProfile}
           activeProviderId={activeProviderId}
           // OpenClaw: default model
           isDefaultModel={isDefaultModel}

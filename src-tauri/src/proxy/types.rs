@@ -228,10 +228,6 @@ fn default_false() -> bool {
     false
 }
 
-fn default_new_terminal_policy() -> String {
-    "reuse".to_string()
-}
-
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -343,6 +339,12 @@ impl Default for CopilotOptimizerConfig {
 /// 默认关闭（`enabled = false`），开启后同一应用类型的多个终端会话各自绑定一条
 /// 独立的路由起点，而不是共享同一条 P1→P2→… 故障转移链。详见
 /// `ProviderRouter::select_providers_for_session`。
+///
+/// 档案模式下的绑定语义：用户预先在 `next_new_terminal_profile_id` 指定「下一个
+/// 新终端」要绑定到哪个命名档案（`None` = 默认共享队列）。当某个尚未绑定的终端
+/// 首次接入时，读取并使用该值，**随后立即把该值清回 `None`**（一次性预设）。
+/// 因此用户每次只控制紧随其后的那一个终端，避免轮转/沿用这类自动策略对用户
+/// 选择的覆盖。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PerTerminalRoutingConfig {
@@ -350,28 +352,24 @@ pub struct PerTerminalRoutingConfig {
     /// `select_providers`，行为与历史版本完全一致，零回归风险。
     #[serde(default = "default_false")]
     pub enabled: bool,
-    /// 新终端策略：`"reuse"`（默认，沿用全局队列起点 P1）或 `"rotate"`
-    /// （按已激活终端数轮转起点，使新终端尽量落在不同 provider 上）。
+    /// 预设「下一个新终端」绑定的命名档案 id。
     ///
-    /// 仅在 `enabled = true` 时生效。已存在的会话始终沿用其首次绑定的起点，
-    /// 不受该策略后续变更影响。
-    #[serde(default = "default_new_terminal_policy")]
-    pub new_terminal_policy: String,
+    /// - `None`（默认）：下一个新终端绑定到默认档案（共享队列，既有路径）。
+    /// - `Some(id)`：下一个新终端绑定到该命名档案。
+    ///
+    /// 该值在首次被一个新终端消费后**立即被清回 `None`**（一次性预设），所以它
+    /// 只影响「下一个」终端，不影响其后再次新开的终端。用户可在前端重新设置它。
+    /// 指向的档案若已被删除，绑定时该值被视为无效并按 `None` 处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_new_terminal_profile_id: Option<String>,
 }
 
 impl Default for PerTerminalRoutingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            new_terminal_policy: "reuse".to_string(),
+            next_new_terminal_profile_id: None,
         }
-    }
-}
-
-impl PerTerminalRoutingConfig {
-    /// 新终端策略是否为轮转模式
-    pub fn is_rotate_policy(&self) -> bool {
-        self.new_terminal_policy.eq_ignore_ascii_case("rotate")
     }
 }
 

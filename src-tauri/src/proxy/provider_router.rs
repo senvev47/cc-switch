@@ -171,17 +171,18 @@ impl ProviderRouter {
     /// `select_providers`，零回归且不泄漏。`clear_*` 驱逐函数已在队列增删/故障转移
     /// 关闭/SQL 导入等变更点接线（见模块文档），但即便未触发，此处门控也已堵住泄漏源头。
     ///
-    /// 起点（offset）的绑定规则：
-    ///   - 首次见到该会话：若策略为 `rotate`，offset = 当前**仍有效**的已绑定会话数
-    ///     （同 app_type 且 `queue_len_at_bind == queue_len`，模队列长度），使新终端
-    ///     尽量落在下一个 provider；策略为 `reuse`（默认）时 offset = 0，
-    ///     即沿用全局队列起点 P1。
+    /// 起点（offset）的绑定规则（默认档案/共享队列模式）：
+    ///   - 首次见到该会话：绑定起点 offset = 0（沿用全局队列起点 P1），并写入绑定。
     ///   - 已绑定且队列长度未变：复用原 offset，并刷新 `last_used` 续期。
     ///   - 队列长度发生变化（增删/重排 provider）：旧绑定失效，按「首次见到」重新派发。
     ///
-    /// 关键不变量：轮转只改变起点，**不改变** provider 集合，也**不改变**熔断器 key
-    /// （始终为 `app_type:provider_id`），因此熔断器状态、健康统计、故障转移语义
-    /// 与 `select_providers` 完全一致，仅 P1→P2→… 的起跑线因会话而异。
+    /// 命名档案模式（该应用存在命名档案时）：见 `select_providers_for_profile`。
+    /// 用户通过 `next_new_terminal_profile_id` 预设「下一个新终端」绑定到哪个档案，
+    /// 消费后立即清回 None（一次性预设）。
+    ///
+    /// 关键不变量：路由只改变起点/档案归属，**不改变** provider 集合，也**不改变**
+    /// 熔断器 key（始终为 `app_type:provider_id`），因此熔断器状态、健康统计、
+    /// 故障转移语义与 `select_providers` 完全一致。
     pub async fn select_providers_for_session(
         &self,
         app_type: &str,
@@ -189,7 +190,7 @@ impl ProviderRouter {
         client_provided: bool,
     ) -> Result<Vec<Provider>, AppError> {
         // 1. 读取按终端路由配置；失败或关闭时直接退化为全局选择，零回归。
-        let routing_config = self.db.get_per_terminal_routing_config().unwrap_or_default();
+        let mut routing_config = self.db.get_per_terminal_routing_config().unwrap_or_default();
         if !routing_config.enabled {
             return self.select_providers(app_type).await;
         }
@@ -219,7 +220,7 @@ impl ProviderRouter {
         //     （共享队列 + offset 偏移），即既有行为，零回归。
         if self.db.app_has_failover_profiles(app_type)? {
             return self
-                .select_providers_for_profile(app_type, session_id, &routing_config)
+                .select_providers_for_profile(app_type, session_id, &mut routing_config)
                 .await;
         }
 
@@ -273,27 +274,11 @@ impl ProviderRouter {
 
         // 走到这里说明未命中已有绑定（首次见到该会话，或 queue_len 变化导致旧绑定失效）：
         // 重新派发 offset 并写入新绑定。
-        let new_offset = if routing_config.is_rotate_policy() {
-            // rotate：按「当前仍有效的已绑定会话数」轮转，使新终端尽量落在不同 provider。
-            // 关键：只统计 queue_len_at_bind == queue_len 的绑定，排除已被队列变更作废的
-            // 过期条目，否则 count 偏大导致新终端撞到已用的起点上。
-            let routes = self.session_routes.read().await;
-            let count = routes
-                .iter()
-                .filter(|(k, route)| {
-                    k.split_once(':').map(|(a, _)| a) == Some(app_type)
-                        && route.queue_len_at_bind == queue_len
-                })
-                .count();
-            if queue_len == 0 {
-                0
-            } else {
-                count % queue_len
-            }
-        } else {
-            // reuse（默认）：新终端沿用全局起点 P1。
-            0
-        };
+        //
+        // 默认档案（共享队列）模式下新终端沿用全局起点 P1（offset=0）。原 rotate/reuse
+        // 策略已移除——按终端的差异化链路请使用命名档案（见 select_providers_for_profile）。
+        // 默认档案模式只保留"每终端固定一个起点（绑定后不变）"这一基本语义。
+        let new_offset: usize = 0;
 
         let bound_provider = ordered_ids.get(new_offset).cloned().unwrap_or_default();
         {
@@ -338,15 +323,20 @@ impl ProviderRouter {
     /// 命名路由档案模式下的按终端选择（Feature #2 升级）。
     ///
     /// 仅当该应用存在命名档案时被 `select_providers_for_session` 调用。每个会话
-    /// 绑定到一个档案 id：命中已有绑定且档案仍存在则复用；否则按策略派发
-    /// （`rotate` → 在命名档案间轮转，使新终端落到下一个档案；`reuse` → 第一个档案）。
-    /// 档案成员序列实时从 DB 读取（始终最新，无需版本字段）；档案被删除或成员变空时
-    /// 重新派发。熔断器 key 仍为 `app_type:provider_id`，与全局路径一致。
+    /// 绑定到一个档案 id：命中已有绑定且档案仍存在则复用；否则按用户预设的
+    /// `next_new_terminal_profile_id` 派发（`None` = 默认共享队列）。档案成员序列
+    /// 实时从 DB 读取（始终最新，无需版本字段）；档案被删除或成员变空时重新派发。
+    /// 熔断器 key 仍为 `app_type:provider_id`，与全局路径一致。
+    ///
+    /// **一次性预设语义**：当本函数消费 `routing_config.next_new_terminal_profile_id`
+    /// 给一个新终端派发后，会立即把该字段清回 `None` 并持久化（"用一次就重置"），
+    /// 所以该预设只影响「下一个」终端，不影响其后再次新开的终端。用户可在前端
+    /// 再次设置它以控制下一个终端。
     async fn select_providers_for_profile(
         &self,
         app_type: &str,
         session_id: &str,
-        routing_config: &crate::proxy::types::PerTerminalRoutingConfig,
+        routing_config: &mut crate::proxy::types::PerTerminalRoutingConfig,
     ) -> Result<Vec<Provider>, AppError> {
         let session_key = format!("{app_type}:{session_id}");
 
@@ -401,9 +391,8 @@ impl ProviderRouter {
                 .await;
         }
 
-        // 3. 未命中或绑定已失效 → 重新派发。
+        // 3. 未命中或绑定已失效 → 按用户预设的「下一个新终端档案」派发。
         let profiles = self.db.list_failover_profiles(app_type)?;
-        // 只在命名档案间派发（默认档案 profile_id=None 由既有共享队列路径处理）。
         let named: Vec<&String> = profiles
             .iter()
             .filter_map(|p| p.profile_id.as_ref())
@@ -413,64 +402,78 @@ impl ProviderRouter {
             return self.select_providers(app_type).await;
         }
 
-        let new_profile_id = if routing_config.is_rotate_policy() {
-            // rotate：按「当前仍有效的已绑定会话数」模档案数轮转，使新终端落到下一个档案。
-            let routes = self.session_routes.read().await;
-            let count = routes
-                .iter()
-                .filter(|(k, _)| k.split_once(':').map(|(a, _)| a) == Some(app_type))
-                .count();
-            named[count % named.len()].clone()
-        } else {
-            // reuse（默认）：新终端绑定到第一个档案。
-            named[0].clone()
-        };
+        // 读取用户预设：None → 默认共享队列（既有路径）；Some(id) → 该命名档案。
+        // 若指向的档案已被删除，视为无效，按 None 处理。
+        let preset_id = routing_config.next_new_terminal_profile_id.take();
+        let preset_valid = preset_id
+            .as_deref()
+            .map(|pid| named.iter().any(|n| n.as_str() == pid))
+            .unwrap_or(false);
 
-        // 写入新绑定（含内存卫生：超阈值 TTL 回收 + 淘汰最旧）。
-        {
-            let mut routes = self.session_routes.write().await;
-            if routes.len() >= MAX_SESSION_ROUTES {
-                routes.retain(|_, route| route.last_used.elapsed() < SESSION_ROUTE_TTL);
-                while routes.len() >= MAX_SESSION_ROUTES {
-                    if let Some(oldest_key) = routes
-                        .iter()
-                        .min_by_key(|(_, route)| route.last_used)
-                        .map(|(k, _)| k.clone())
-                    {
-                        routes.remove(&oldest_key);
-                    } else {
-                        break;
-                    }
+        if let Some(pid) = preset_id {
+            if preset_valid {
+                // 预设被消费：持久化清回 None（"用一次就重置"）。
+                if let Err(e) = self.db.set_per_terminal_routing_config(routing_config) {
+                    log::warn!("[{app_type}] 持久化预设清空失败（继续派发）: {e}");
                 }
+                // 派发到该命名档案。
+                let ordered_ids = self.db.get_failover_profile_member_ids(app_type, Some(&pid))?;
+                if ordered_ids.is_empty() {
+                    log::warn!(
+                        "[{app_type}] 按终端路由：会话 {session_id} 预设档案 {pid} 成员为空，退化"
+                    );
+                    return self.select_providers(app_type).await;
+                }
+                // 写入新绑定（含内存卫生）。
+                {
+                    let mut routes = self.session_routes.write().await;
+                    if routes.len() >= MAX_SESSION_ROUTES {
+                        routes.retain(|_, route| route.last_used.elapsed() < SESSION_ROUTE_TTL);
+                        while routes.len() >= MAX_SESSION_ROUTES {
+                            if let Some(oldest_key) = routes
+                                .iter()
+                                .min_by_key(|(_, route)| route.last_used)
+                                .map(|(k, _)| k.clone())
+                            {
+                                routes.remove(&oldest_key);
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    routes.insert(
+                        session_key.clone(),
+                        SessionRoute {
+                            queue_len_at_bind: 0,
+                            offset: 0,
+                            last_used: Instant::now(),
+                            profile_id: Some(pid.clone()),
+                        },
+                    );
+                }
+                let all_providers = self.db.get_all_providers(app_type)?;
+                log::info!(
+                    "[{app_type}] 按终端路由：会话 {session_id} 按预设绑定档案 {pid} (members={})",
+                    ordered_ids.len()
+                );
+                let qlen = ordered_ids.len();
+                return self
+                    .rotate_providers(app_type, ordered_ids, &all_providers, 0, qlen)
+                    .await;
+            } else {
+                // 预设指向已删除的档案：也持久化清回 None，避免残留无效预设。
+                if let Err(e) = self.db.set_per_terminal_routing_config(routing_config) {
+                    log::warn!("[{app_type}] 持久化无效预设清空失败: {e}");
+                }
+                log::warn!(
+                    "[{app_type}] 按终端路由：会话 {session_id} 预设档案已失效，退化默认"
+                );
             }
-            routes.insert(
-                session_key.clone(),
-                SessionRoute {
-                    queue_len_at_bind: 0,
-                    offset: 0,
-                    last_used: Instant::now(),
-                    profile_id: Some(new_profile_id.clone()),
-                },
-            );
         }
 
-        let ordered_ids = self
-            .db
-            .get_failover_profile_member_ids(app_type, Some(&new_profile_id))?;
-        if ordered_ids.is_empty() {
-            log::warn!(
-                "[{app_type}] 按终端路由：会话 {session_id} 新绑档案 {new_profile_id} 成员为空，退化"
-            );
-            return self.select_providers(app_type).await;
-        }
-        let all_providers = self.db.get_all_providers(app_type)?;
-        log::info!(
-            "[{app_type}] 按终端路由：会话 {session_id} 绑定档案 {new_profile_id} (members={})",
-            ordered_ids.len()
-        );
-        let qlen = ordered_ids.len();
-        self.rotate_providers(app_type, ordered_ids, &all_providers, 0, qlen)
-            .await
+        // 4. 无预设（或预设无效已清空）→ 退化为默认共享队列（既有路径）。
+        //    不写入任何 profile_id 绑定，避免把"未显式选择"的终端锁死到某个档案。
+        self.select_providers(app_type).await
     }
 
     /// 按 offset 轮转 `ordered_ids`，再走与 `select_providers` 完全一致的熔断器过滤。
