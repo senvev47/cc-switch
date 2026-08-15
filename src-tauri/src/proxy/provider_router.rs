@@ -328,10 +328,10 @@ impl ProviderRouter {
     /// 实时从 DB 读取（始终最新，无需版本字段）；档案被删除或成员变空时重新派发。
     /// 熔断器 key 仍为 `app_type:provider_id`，与全局路径一致。
     ///
-    /// **一次性预设语义**：当本函数消费 `routing_config.next_new_terminal_profile_id`
-    /// 给一个新终端派发后，会立即把该字段清回 `None` 并持久化（"用一次就重置"），
-    /// 所以该预设只影响「下一个」终端，不影响其后再次新开的终端。用户可在前端
-    /// 再次设置它以控制下一个终端。
+    /// **持久保留语义**（用户要求）：预设 `next_new_terminal_profile_id` **不**在
+    /// 新终端绑定时清回 `None`——它一直保留，每个新开终端都绑定到该档案，直到
+    /// 用户在前端手动改成另一个档案或「默认共享队列」。唯一会被后端清回的情形：
+    /// 预设指向的档案已被删除（无效数据清理，非覆盖用户显式选择）。
     async fn select_providers_for_profile(
         &self,
         app_type: &str,
@@ -403,8 +403,13 @@ impl ProviderRouter {
         }
 
         // 读取用户预设：None → 默认共享队列（既有路径）；Some(id) → 该命名档案。
-        // 若指向的档案已被删除，视为无效，按 None 处理。
-        let preset_id = routing_config.next_new_terminal_profile_id.take();
+        // 若指向的档案已被删除，视为无效，按 None 处理并清回（无效数据清理，
+        // 非覆盖用户意图）。
+        //
+        // **持久保留语义**（用户要求）：预设**不**在新终端绑定时清回 None，
+        // 而是一直保留到用户手动更改。这样用户设一次后，每个新开的终端都会
+        // 绑定到该档案，直到用户在前端改成另一个档案或「默认共享队列」。
+        let preset_id = routing_config.next_new_terminal_profile_id.clone();
         let preset_valid = preset_id
             .as_deref()
             .map(|pid| named.iter().any(|n| n.as_str() == pid))
@@ -412,11 +417,7 @@ impl ProviderRouter {
 
         if let Some(pid) = preset_id {
             if preset_valid {
-                // 预设被消费：持久化清回 None（"用一次就重置"）。
-                if let Err(e) = self.db.set_per_terminal_routing_config(routing_config) {
-                    log::warn!("[{app_type}] 持久化预设清空失败（继续派发）: {e}");
-                }
-                // 派发到该命名档案。
+                // 派发到该命名档案。预设不清回（持久保留，用户手动调节）。
                 let ordered_ids = self.db.get_failover_profile_member_ids(app_type, Some(&pid))?;
                 if ordered_ids.is_empty() {
                     log::warn!(
@@ -461,12 +462,14 @@ impl ProviderRouter {
                     .rotate_providers(app_type, ordered_ids, &all_providers, 0, qlen)
                     .await;
             } else {
-                // 预设指向已删除的档案：也持久化清回 None，避免残留无效预设。
+                // 预设指向已删除的档案：清回 None，避免残留无效预设（这是数据清理，
+                // 不是覆盖用户的显式选择——档案已不存在，用户的选择已无意义）。
+                routing_config.next_new_terminal_profile_id = None;
                 if let Err(e) = self.db.set_per_terminal_routing_config(routing_config) {
                     log::warn!("[{app_type}] 持久化无效预设清空失败: {e}");
                 }
                 log::warn!(
-                    "[{app_type}] 按终端路由：会话 {session_id} 预设档案已失效，退化默认"
+                    "[{app_type}] 按终端路由：会话 {session_id} 预设档案已失效（被删除），退化默认"
                 );
             }
         }

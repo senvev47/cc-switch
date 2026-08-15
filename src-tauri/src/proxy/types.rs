@@ -340,11 +340,10 @@ impl Default for CopilotOptimizerConfig {
 /// 独立的路由起点，而不是共享同一条 P1→P2→… 故障转移链。详见
 /// `ProviderRouter::select_providers_for_session`。
 ///
-/// 档案模式下的绑定语义：用户预先在 `next_new_terminal_profile_id` 指定「下一个
-/// 新终端」要绑定到哪个命名档案（`None` = 默认共享队列）。当某个尚未绑定的终端
-/// 首次接入时，读取并使用该值，**随后立即把该值清回 `None`**（一次性预设）。
-/// 因此用户每次只控制紧随其后的那一个终端，避免轮转/沿用这类自动策略对用户
-/// 选择的覆盖。
+/// 档案模式下的绑定语义：用户在 `next_new_terminal_profile_id` 指定新终端要
+/// 绑定到哪个命名档案（`None` = 默认共享队列）。该预设**持久保留**——每个新开
+/// 终端都会绑定到该档案，直到用户手动改成另一个档案或「默认共享队列」。后端
+/// 唯一会清回 `None` 的情形：预设指向的档案已被删除（无效数据清理）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PerTerminalRoutingConfig {
@@ -352,14 +351,12 @@ pub struct PerTerminalRoutingConfig {
     /// `select_providers`，行为与历史版本完全一致，零回归风险。
     #[serde(default = "default_false")]
     pub enabled: bool,
-    /// 预设「下一个新终端」绑定的命名档案 id。
+    /// 新终端绑定的命名档案 id（持久保留，直到用户手动更改）。
     ///
-    /// - `None`（默认）：下一个新终端绑定到默认档案（共享队列，既有路径）。
-    /// - `Some(id)`：下一个新终端绑定到该命名档案。
-    ///
-    /// 该值在首次被一个新终端消费后**立即被清回 `None`**（一次性预设），所以它
-    /// 只影响「下一个」终端，不影响其后再次新开的终端。用户可在前端重新设置它。
-    /// 指向的档案若已被删除，绑定时该值被视为无效并按 `None` 处理。
+    /// - `None`（默认）：新终端绑定到默认档案（共享队列，既有路径）。
+    /// - `Some(id)`：新终端绑定到该命名档案。**不会**在绑定后自动清回——每个
+    ///   新开终端都绑定到该档案，直到用户在前端改成另一个档案或「默认共享队列」。
+    ///   指向的档案若已被删除，绑定时该值被视为无效、清回 `None` 并按默认处理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_new_terminal_profile_id: Option<String>,
 }

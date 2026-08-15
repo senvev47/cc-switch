@@ -99,11 +99,11 @@ export function FailoverProfilesPanel({
         profileId
           ? t(
               "proxy.failoverProfiles.presetSet",
-              "已设为下一个新终端的档案（仅生效一次）",
+              "已设为新终端的档案（保持，直到你手动更改）",
             )
           : t(
               "proxy.failoverProfiles.presetCleared",
-              "已清除预设，下一个新终端将走默认共享队列",
+              "已设为默认共享队列（保持，直到你手动更改）",
             ),
         { closeButton: true },
       );
@@ -280,13 +280,13 @@ export function FailoverProfilesPanel({
               <span className="text-sm font-medium">
                 {t(
                   "proxy.failoverProfiles.nextNewTerminal",
-                  "下一个新终端使用",
+                  "新终端使用",
                 )}
               </span>
               <p className="text-xs text-muted-foreground">
                 {t(
                   "proxy.failoverProfiles.nextNewTerminalHint",
-                  "设好后，下一个新接入的终端会绑定到该档案，绑定后预设自动清回默认。",
+                  "设好后，每个新接入的终端都会绑定到该档案，直到你手动更改。已开的终端不受影响。",
                 )}
               </p>
             </div>
