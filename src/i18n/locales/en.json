@@ -2770,7 +2770,29 @@
       "stopFailed": "Failed to stop routing service: {{detail}}"
     },
     "stoppedWithRestore": "Routing service stopped, all routing configs restored",
-    "stopWithRestoreFailed": "Stop failed: {{detail}}"
+    "stopWithRestoreFailed": "Stop failed: {{detail}}",
+    "failoverProfiles": {
+      "title": "Named Failover Profiles (per-terminal independent chains)",
+      "description": "Define an independent failover chain for different terminals; after enabling per-terminal routing, new terminals bind to a profile by policy.",
+      "intro": "Named profiles give each terminal its own failover chain. The 'Auto Failover Queue' above is the default profile (shared by all terminals). Once you define any named profile, enabling per-terminal routing makes new terminals bind to different profiles by policy.",
+      "newNamePlaceholder": "New profile name (e.g. backup / high-throughput)",
+      "create": "New Profile",
+      "createSuccess": "Profile created",
+      "createFailed": "Failed to create profile",
+      "renameSuccess": "Profile renamed",
+      "renameFailed": "Rename failed",
+      "confirmDelete": "Delete this profile? Only the profile and its membership are removed; providers themselves are not deleted.",
+      "deleteSuccess": "Profile deleted",
+      "deleteFailed": "Delete failed",
+      "selectProvider": "Select a provider to add to this profile",
+      "addProviderSuccess": "Added to profile",
+      "addProviderFailed": "Add failed",
+      "removeProviderFailed": "Remove failed",
+      "reorderFailed": "Reorder failed",
+      "empty": "No named profiles yet. Create one to give different terminals their own chains.",
+      "noMembers": "This profile has no members yet",
+      "membersUnit": ""
+    }
   },
   "streamCheck": {
     "reachable": "{{providerName}} is reachable ({{responseTimeMs}}ms)",

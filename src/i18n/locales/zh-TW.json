@@ -2771,7 +2771,29 @@
       "stopFailed": "停止路由服務失敗：{{detail}}"
     },
     "stoppedWithRestore": "路由服務已關閉，已還原所有路由設定",
-    "stopWithRestoreFailed": "停止失敗：{{detail}}"
+    "stopWithRestoreFailed": "停止失敗：{{detail}}",
+    "failoverProfiles": {
+      "title": "命名故障轉移檔案（按終端獨立鏈路）",
+      "description": "為不同終端定義獨立的故障轉移鏈路；開啟按終端路由後新終端按策略綁定檔案。",
+      "intro": "命名檔案讓每個終端走獨立的故障轉移鏈路。上方「自動故障轉移佇列」是預設檔案（所有終端共享）。定義任意命名檔案後，開啟按終端路由即可讓新終端按策略綁定到不同檔案。",
+      "newNamePlaceholder": "新檔案名稱（如：備用鏈路 / 高併發組）",
+      "create": "新建檔案",
+      "createSuccess": "已建立檔案",
+      "createFailed": "建立檔案失敗",
+      "renameSuccess": "已重新命名檔案",
+      "renameFailed": "重新命名失敗",
+      "confirmDelete": "刪除該檔案？僅清除檔案與其成員關係，不會刪除供應商本身。",
+      "deleteSuccess": "已刪除檔案",
+      "deleteFailed": "刪除失敗",
+      "selectProvider": "選擇供應商加入此檔案",
+      "addProviderSuccess": "已加入檔案",
+      "addProviderFailed": "新增失敗",
+      "removeProviderFailed": "移除失敗",
+      "reorderFailed": "重排失敗",
+      "empty": "尚未建立命名檔案。建立後即可讓不同終端走獨立鏈路。",
+      "noMembers": "該檔案暫無成員",
+      "membersUnit": "家"
+    }
   },
   "streamCheck": {
     "reachable": "{{providerName}} 連通正常 ({{responseTimeMs}}ms)",

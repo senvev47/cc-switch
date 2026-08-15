@@ -2770,7 +2770,29 @@
       "stopFailed": "停止路由服务失败：{{detail}}"
     },
     "stoppedWithRestore": "路由服务已关闭，已恢复所有路由配置",
-    "stopWithRestoreFailed": "停止失败: {{detail}}"
+    "stopWithRestoreFailed": "停止失败: {{detail}}",
+    "failoverProfiles": {
+      "title": "命名故障转移档案（按终端独立链路）",
+      "description": "为不同终端定义独立的故障转移链路；开启按终端路由后新终端按策略绑定档案。",
+      "intro": "命名档案让每个终端走独立的故障转移链路。上方「自动故障转移队列」是默认档案（所有终端共享）。定义任意命名档案后，开启按终端路由即可让新终端按策略绑定到不同档案。",
+      "newNamePlaceholder": "新档案名称（如：备用链路 / 高并发组）",
+      "create": "新建档案",
+      "createSuccess": "已创建档案",
+      "createFailed": "创建档案失败",
+      "renameSuccess": "已重命名档案",
+      "renameFailed": "重命名失败",
+      "confirmDelete": "删除该档案？仅清除档案与其成员关系，不会删除供应商本身。",
+      "deleteSuccess": "已删除档案",
+      "deleteFailed": "删除失败",
+      "selectProvider": "选择供应商加入此档案",
+      "addProviderSuccess": "已加入档案",
+      "addProviderFailed": "添加失败",
+      "removeProviderFailed": "移除失败",
+      "reorderFailed": "重排失败",
+      "empty": "尚未创建命名档案。新建后即可让不同终端走独立链路。",
+      "noMembers": "该档案暂无成员",
+      "membersUnit": "家"
+    }
   },
   "streamCheck": {
     "reachable": "{{providerName}} 连通正常 ({{responseTimeMs}}ms)",

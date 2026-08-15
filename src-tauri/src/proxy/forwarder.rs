@@ -2898,33 +2898,13 @@ impl RequestForwarder {
     fn categorize_proxy_error(
         &self,
         error: &ProxyError,
-        provider: &Provider,
+        #[allow(unused_variables)] provider: &Provider,
         has_failover_candidates: bool,
     ) -> ErrorCategory {
-        // Authentication belongs to the Codex client for the built-in official
-        // route. Retrying another provider would silently move the conversation
-        // away from the selected official account and poison its health state.
-        if super::providers::is_codex_official_provider(provider)
-            && (matches!(error, ProxyError::AuthError(_))
-                || matches!(
-                    error,
-                    ProxyError::UpstreamError {
-                        status: 401 | 403,
-                        ..
-                    }
-                ))
-        {
-            return ErrorCategory::NonRetryable;
-        }
-
-        // xAI OAuth mirrors the same rule for token acquisition: a local
-        // AuthError means the managed account needs re-login. Failing over
-        // would silently move the conversation off the selected Grok account
-        // and poison the provider's health state for an account-level issue.
-        if provider.is_xai_oauth() && matches!(error, ProxyError::AuthError(_)) {
-            return ErrorCategory::NonRetryable;
-        }
-
+        // 按用户需求：所有 4xx（含 codex 官方 401/403 与 xAI OAuth 鉴权错误）
+        // 与 5xx/网络/超时错误一律在「有下一家可试」时转移到下一家，队列耗尽才停止。
+        // 既往对 codex 官方 401/403 与 xAI OAuth AuthError 的 NonRetryable 特例已移除
+        // （会话不再被钉死在单一官方账号上，故障转移可以换家继续）。
         match error {
             // 网络和上游错误：都应该尝试下一个供应商
             ProxyError::Timeout(_) => ErrorCategory::Retryable,
@@ -4854,7 +4834,9 @@ mod tests {
     }
 
     #[test]
-    fn official_codex_auth_failures_are_not_retryable() {
+    fn official_codex_auth_failures_are_retryable_with_candidates() {
+        // 按用户需求：codex 官方 401/403 与本地 AuthError 现在与其它 4xx 一致 ——
+        // 有下一家可试时转移到下一家，不再钉死在单一官方账号上。
         let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
         let mut provider = test_provider_with_type(None);
         provider.id = "codex-official".to_string();
@@ -4873,26 +4855,38 @@ mod tests {
         ] {
             assert_eq!(
                 forwarder.categorize_proxy_error(&error, &provider, true),
-                ErrorCategory::NonRetryable
+                ErrorCategory::Retryable
             );
         }
+
+        // 无候选（单 provider）时仍为 NonRetryable：单供应商模式下换无可换。
+        assert_eq!(
+            forwarder.categorize_proxy_error(
+                &ProxyError::UpstreamError {
+                    status: 403,
+                    body: None,
+                },
+                &provider,
+                false,
+            ),
+            ErrorCategory::NonRetryable
+        );
     }
 
     #[test]
-    fn xai_oauth_token_auth_failures_are_not_retryable() {
+    fn xai_oauth_auth_failures_are_retryable_with_candidates() {
+        // 按用户需求：xAI OAuth 本地 AuthError 与上游 401/403 现在都在有候选时转移。
         let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
         let provider = test_provider_with_type(Some("xai_oauth"));
 
-        // 本地取 token 失败 = 账号级问题（需重新登录），failover 无济于事
         assert_eq!(
             forwarder.categorize_proxy_error(
                 &ProxyError::AuthError("xAI OAuth 认证失败".to_string()),
                 &provider,
                 true,
             ),
-            ErrorCategory::NonRetryable
+            ErrorCategory::Retryable
         );
-        // 上游 401/403 保持 Retryable：换 provider 可能持有可用的 key
         assert_eq!(
             forwarder.categorize_proxy_error(
                 &ProxyError::UpstreamError {
@@ -4903,6 +4897,16 @@ mod tests {
                 true,
             ),
             ErrorCategory::Retryable
+        );
+
+        // 无候选（单 provider）时仍为 NonRetryable。
+        assert_eq!(
+            forwarder.categorize_proxy_error(
+                &ProxyError::AuthError("xAI OAuth 认证失败".to_string()),
+                &provider,
+                false,
+            ),
+            ErrorCategory::NonRetryable
         );
     }
 

@@ -32,15 +32,24 @@ const SESSION_ROUTE_TTL: Duration = Duration::from_secs(30 * 60);
 /// 一旦某个终端会话首次绑定了一条 P1→P2→… 起点偏移，后续该会话的所有请求
 /// 都沿用同一偏移，使「一个终端 = 一套路由链」成立。绑定仅当故障转移队列
 /// 长度变化（增删/重排 provider）时失效，触发下次请求重新派发。
+///
+/// Feature #2 升级（命名路由档案）：当该应用定义了命名档案时，
+/// `profile_id = Some(id)` 指示该会话绑定到某条**独立**的档案链路；该档案的
+/// 成员序列即 P1→P2→…，与其它终端互不影响。`profile_id = None` 表示仍走默认
+/// 档案（共享队列 + `offset` 偏移），即既有行为，零回归。档案模式下 `offset`
+/// 不再使用（保留字段以复用同一结构体）。
 #[derive(Clone, Debug)]
 struct SessionRoute {
     /// 绑定时故障转移队列的长度；与当前队列长度不一致则视为过期绑定
     queue_len_at_bind: usize,
-    /// 起点偏移：`ordered_ids[offset]` 为该会话的 P1
+    /// 起点偏移：`ordered_ids[offset]` 为该会话的 P1（默认档案模式用）
     offset: usize,
     /// 最近一次命中该绑定的时间；用于超阈值插入时的 TTL 回收与淘汰最旧。
     /// 命中分支在复用 offset 前会刷新此字段（续期），活跃会话不会被误回收。
     last_used: Instant,
+    /// 绑定的命名档案 id；`None` = 默认档案（共享队列 + offset）。
+    /// 仅当该应用存在命名档案时才取 `Some` 值。
+    profile_id: Option<String>,
 }
 
 /// 供应商路由器
@@ -204,6 +213,16 @@ impl ProviderRouter {
             return self.select_providers(app_type).await;
         }
 
+        // 3b. 命名路由档案模式（Feature #2 升级）：若该应用定义了任意命名档案，
+        //     则按终端走「独立档案链」——每个终端会话绑定到一个档案，该档案的成员
+        //     序列即其 P1→P2→… 链路，与其它终端互不影响。否则继续走默认档案
+        //     （共享队列 + offset 偏移），即既有行为，零回归。
+        if self.db.app_has_failover_profiles(app_type)? {
+            return self
+                .select_providers_for_profile(app_type, session_id, &routing_config)
+                .await;
+        }
+
         // 3. 取全局有序 id（与 select_providers 同源，确保 provider 集合与熔断器 key 一致）。
         let all_providers = self.db.get_all_providers(app_type)?;
         let ordered_ids: Vec<String> = self
@@ -302,6 +321,7 @@ impl ProviderRouter {
                     queue_len_at_bind: queue_len,
                     offset: new_offset,
                     last_used: Instant::now(),
+                    profile_id: None,
                 },
             );
         }
@@ -312,6 +332,144 @@ impl ProviderRouter {
         );
 
         self.rotate_providers(app_type, ordered_ids, &all_providers, new_offset, queue_len)
+            .await
+    }
+
+    /// 命名路由档案模式下的按终端选择（Feature #2 升级）。
+    ///
+    /// 仅当该应用存在命名档案时被 `select_providers_for_session` 调用。每个会话
+    /// 绑定到一个档案 id：命中已有绑定且档案仍存在则复用；否则按策略派发
+    /// （`rotate` → 在命名档案间轮转，使新终端落到下一个档案；`reuse` → 第一个档案）。
+    /// 档案成员序列实时从 DB 读取（始终最新，无需版本字段）；档案被删除或成员变空时
+    /// 重新派发。熔断器 key 仍为 `app_type:provider_id`，与全局路径一致。
+    async fn select_providers_for_profile(
+        &self,
+        app_type: &str,
+        session_id: &str,
+        routing_config: &crate::proxy::types::PerTerminalRoutingConfig,
+    ) -> Result<Vec<Provider>, AppError> {
+        let session_key = format!("{app_type}:{session_id}");
+
+        // 1. 命中已有绑定且该档案仍存在 → 复用。
+        let bound_profile: Option<String> = {
+            let routes = self.session_routes.read().await;
+            if let Some(route) = routes.get(&session_key) {
+                if let Some(pid) = &route.profile_id {
+                    // 档案仍存在则复用；被删除则落到下方重新派发。
+                    let still_exists = self
+                        .db
+                        .list_failover_profiles(app_type)?
+                        .iter()
+                        .any(|p| p.profile_id.as_deref() == Some(pid.as_str()));
+                    if still_exists {
+                        Some(pid.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        // 2. 命中：刷新 last_used 续期，读取档案成员作为有序链。
+        if let Some(pid) = bound_profile {
+            {
+                let mut routes = self.session_routes.write().await;
+                if let Some(route) = routes.get_mut(&session_key) {
+                    route.last_used = Instant::now();
+                }
+            }
+            let ordered_ids = self.db.get_failover_profile_member_ids(app_type, Some(&pid))?;
+            if ordered_ids.is_empty() {
+                // 档案成员被清空 → 退化为全局选择，避免该终端无可用 provider。
+                log::warn!(
+                    "[{app_type}] 按终端路由：会话 {session_id} 绑定的档案 {pid} 成员为空，退化"
+                );
+                return self.select_providers(app_type).await;
+            }
+            let all_providers = self.db.get_all_providers(app_type)?;
+            log::info!(
+                "[{app_type}] 按终端路由：会话 {session_id} 复用档案 {pid} (members={})",
+                ordered_ids.len()
+            );
+            let qlen = ordered_ids.len();
+            return self
+                .rotate_providers(app_type, ordered_ids, &all_providers, 0, qlen)
+                .await;
+        }
+
+        // 3. 未命中或绑定已失效 → 重新派发。
+        let profiles = self.db.list_failover_profiles(app_type)?;
+        // 只在命名档案间派发（默认档案 profile_id=None 由既有共享队列路径处理）。
+        let named: Vec<&String> = profiles
+            .iter()
+            .filter_map(|p| p.profile_id.as_ref())
+            .collect();
+        if named.is_empty() {
+            // 理论不达（外层已确认 app_has_failover_profiles），防御性退化。
+            return self.select_providers(app_type).await;
+        }
+
+        let new_profile_id = if routing_config.is_rotate_policy() {
+            // rotate：按「当前仍有效的已绑定会话数」模档案数轮转，使新终端落到下一个档案。
+            let routes = self.session_routes.read().await;
+            let count = routes
+                .iter()
+                .filter(|(k, _)| k.split_once(':').map(|(a, _)| a) == Some(app_type))
+                .count();
+            named[count % named.len()].clone()
+        } else {
+            // reuse（默认）：新终端绑定到第一个档案。
+            named[0].clone()
+        };
+
+        // 写入新绑定（含内存卫生：超阈值 TTL 回收 + 淘汰最旧）。
+        {
+            let mut routes = self.session_routes.write().await;
+            if routes.len() >= MAX_SESSION_ROUTES {
+                routes.retain(|_, route| route.last_used.elapsed() < SESSION_ROUTE_TTL);
+                while routes.len() >= MAX_SESSION_ROUTES {
+                    if let Some(oldest_key) = routes
+                        .iter()
+                        .min_by_key(|(_, route)| route.last_used)
+                        .map(|(k, _)| k.clone())
+                    {
+                        routes.remove(&oldest_key);
+                    } else {
+                        break;
+                    }
+                }
+            }
+            routes.insert(
+                session_key.clone(),
+                SessionRoute {
+                    queue_len_at_bind: 0,
+                    offset: 0,
+                    last_used: Instant::now(),
+                    profile_id: Some(new_profile_id.clone()),
+                },
+            );
+        }
+
+        let ordered_ids = self
+            .db
+            .get_failover_profile_member_ids(app_type, Some(&new_profile_id))?;
+        if ordered_ids.is_empty() {
+            log::warn!(
+                "[{app_type}] 按终端路由：会话 {session_id} 新绑档案 {new_profile_id} 成员为空，退化"
+            );
+            return self.select_providers(app_type).await;
+        }
+        let all_providers = self.db.get_all_providers(app_type)?;
+        log::info!(
+            "[{app_type}] 按终端路由：会话 {session_id} 绑定档案 {new_profile_id} (members={})",
+            ordered_ids.len()
+        );
+        let qlen = ordered_ids.len();
+        self.rotate_providers(app_type, ordered_ids, &all_providers, 0, qlen)
             .await
     }
 

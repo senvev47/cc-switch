@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { ProxyPanel } from "@/components/proxy";
 import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPanel";
 import { FailoverQueueManager } from "@/components/proxy/FailoverQueueManager";
+import { FailoverProfilesPanel } from "@/components/proxy/FailoverProfilesPanel";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { PerTerminalRoutingConfigPanel } from "@/components/settings/PerTerminalRoutingConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
@@ -206,6 +207,26 @@ export function ProxyTabContent({
                           </p>
                         </div>
                         <FailoverQueueManager
+                          appType={appType}
+                          disabled={failoverDisabled}
+                        />
+                      </div>
+                      <div className="border-t border-border/50 pt-6">
+                        <div>
+                          <h4 className="text-sm font-semibold">
+                            {t(
+                              "proxy.failoverProfiles.title",
+                              "命名故障转移档案（按终端独立链路）",
+                            )}
+                          </h4>
+                          <p className="text-xs text-muted-foreground">
+                            {t(
+                              "proxy.failoverProfiles.description",
+                              "为不同终端定义独立的故障转移链路；开启按终端路由后新终端按策略绑定档案。",
+                            )}
+                          </p>
+                        </div>
+                        <FailoverProfilesPanel
                           appType={appType}
                           disabled={failoverDisabled}
                         />

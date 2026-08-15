@@ -1527,6 +1527,15 @@ pub fn run() {
             commands::remove_from_failover_queue,
             commands::get_auto_failover_enabled,
             commands::set_auto_failover_enabled,
+            // 命名故障转移路由档案（Feature #2 升级：每终端独立故障转移队列）
+            commands::list_failover_profiles,
+            commands::create_failover_profile,
+            commands::rename_failover_profile,
+            commands::delete_failover_profile,
+            commands::get_failover_profile_members,
+            commands::add_provider_to_failover_profile,
+            commands::remove_provider_from_failover_profile,
+            commands::reorder_failover_profile_members,
             // Usage statistics
             commands::get_usage_summary,
             commands::get_usage_summary_by_app,

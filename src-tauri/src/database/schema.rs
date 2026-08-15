@@ -402,6 +402,40 @@ impl Database {
             [],
         );
 
+        // 命名故障转移路由档案（Feature #2 升级：每终端独立故障转移队列）
+        // 默认档案是虚拟的（profile_id = NULL → 共享队列），此处只存命名档案。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS failover_profiles (
+                id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                sort_index INTEGER,
+                created_at INTEGER,
+                PRIMARY KEY (id, app_type)
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS failover_profile_members (
+                profile_id TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                sort_index INTEGER,
+                PRIMARY KEY (profile_id, app_type, provider_id)
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_failover_profile_members_app
+             ON failover_profile_members(app_type, profile_id, sort_index)",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         Ok(())
     }
 

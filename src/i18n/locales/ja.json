@@ -2770,7 +2770,29 @@
       "stopFailed": "ルーティングサービスの停止に失敗しました: {{detail}}"
     },
     "stoppedWithRestore": "ルーティングサービスが停止し、すべてのルーティング設定が復元されました",
-    "stopWithRestoreFailed": "停止に失敗しました: {{detail}}"
+    "stopWithRestoreFailed": "停止に失敗しました: {{detail}}",
+    "failoverProfiles": {
+      "title": "名前付きフェイルオーバープロファイル（端末別独立チェーン）",
+      "description": "端末ごとに独立したフェイルオーバーチェーンを定義します。端末別ルーティングを有効化すると、新端末はポリシーに従いプロファイルに紐付きます。",
+      "intro": "名前付きプロファイルは各端末に独立したフェイルオーバーチェーンを与えます。上の「自動フェイルオーバーキュー」は既定プロファイル（全端末共有）です。名前付きプロファイルを一つでも定義すれば、端末別ルーティングの有効化で新端末がポリシーに従い別々のプロファイルに紐付きます。",
+      "newNamePlaceholder": "新規プロファイル名（例: バックアップ / 高スループット）",
+      "create": "新規プロファイル",
+      "createSuccess": "プロファイルを作成しました",
+      "createFailed": "プロファイル作成に失敗しました",
+      "renameSuccess": "プロファイル名を変更しました",
+      "renameFailed": "名前変更に失敗しました",
+      "confirmDelete": "このプロファイルを削除しますか？プロファイルとメンバーシップのみ削除し、プロバイダ自体は削除しません。",
+      "deleteSuccess": "プロファイルを削除しました",
+      "deleteFailed": "削除に失敗しました",
+      "selectProvider": "このプロファイルに追加するプロバイダを選択",
+      "addProviderSuccess": "プロファイルに追加しました",
+      "addProviderFailed": "追加に失敗しました",
+      "removeProviderFailed": "削除に失敗しました",
+      "reorderFailed": "並び替えに失敗しました",
+      "empty": "名前付きプロファイルがありません。作成すると各端末に独立チェーンを与えられます。",
+      "noMembers": "このプロファイルにはメンバーがいません",
+      "membersUnit": "件"
+    }
   },
   "streamCheck": {
     "reachable": "{{providerName}} は接続可能 ({{responseTimeMs}}ms)",
