@@ -185,16 +185,19 @@ impl Database {
                          ORDER BY COALESCE(p.sort_index, 999999), p.id ASC",
                     )
                     .map_err(|e| AppError::Database(e.to_string()))?;
-                stmt.query_map([app_type], |row| {
-                    Ok(FailoverProfileMember {
-                        provider_id: row.get(0)?,
-                        provider_name: row.get(1)?,
-                        sort_index: row.get(2)?,
+                let rows = stmt
+                    .query_map([app_type], |row| {
+                        Ok(FailoverProfileMember {
+                            provider_id: row.get(0)?,
+                            provider_name: row.get(1)?,
+                            sort_index: row.get(2)?,
+                        })
                     })
-                })
-                .map_err(|e| AppError::Database(e.to_string()))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| AppError::Database(e.to_string()))
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                let items = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                Ok(items)
             }
             Some(pid) => {
                 let mut stmt = conn
@@ -207,16 +210,19 @@ impl Database {
                          ORDER BY COALESCE(m.sort_index, 999999), m.provider_id ASC",
                     )
                     .map_err(|e| AppError::Database(e.to_string()))?;
-                stmt.query_map(rusqlite::params![pid, app_type], |row| {
-                    Ok(FailoverProfileMember {
-                        provider_id: row.get(0)?,
-                        provider_name: row.get(1)?,
-                        sort_index: row.get(2)?,
+                let rows = stmt
+                    .query_map(rusqlite::params![pid, app_type], |row| {
+                        Ok(FailoverProfileMember {
+                            provider_id: row.get(0)?,
+                            provider_name: row.get(1)?,
+                            sort_index: row.get(2)?,
+                        })
                     })
-                })
-                .map_err(|e| AppError::Database(e.to_string()))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| AppError::Database(e.to_string()))
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                let items = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                Ok(items)
             }
         }
     }
