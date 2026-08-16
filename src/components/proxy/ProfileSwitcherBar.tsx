@@ -8,7 +8,7 @@ import {
   useFailoverProfiles,
   toNamedFailoverProfiles,
 } from "@/lib/query/failoverProfiles";
-import type { AppId } from "@/types";
+import type { AppId } from "@/lib/api";
 
 /**
  * 供应商列表上方的「档案快速切换」栏（「档案即端口」）。
