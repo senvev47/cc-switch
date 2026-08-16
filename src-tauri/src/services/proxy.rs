@@ -1632,7 +1632,7 @@ impl ProxyService {
             Err(e) => {
                 let msg = format!("启动档案端口 server 失败: {e}");
                 // 端口映射是本次新分配的？若是，回滚以释放供下次重试。
-                if self.db.get_profile_port(app_type, profile_id).ok() == Some(port) {
+                if self.db.get_profile_port(app_type, profile_id).ok() == Some(Some(port)) {
                     let _ = self.db.clear_profile_port(app_type, profile_id);
                 }
                 Err(msg)

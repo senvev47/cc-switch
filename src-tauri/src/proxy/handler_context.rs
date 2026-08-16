@@ -139,14 +139,15 @@ impl RequestContext {
         //   2. 既有的按终端路由（推断式）：仅当 PerTerminalRoutingConfig 开启、该应用
         //      启用了自动故障转移、且 session_id 来自客户端稳定标识时才按会话绑定起点，
         //      否则 `select_providers_for_session` 内部退化为 `select_providers`，零回归。
+        // 取本端口的档案绑定（`None` = 主端口走既有路由，`Some` = 档案端口走显式档案）。
+        // 绑定档案的 app_type 必须与请求的 app_type 一致——否则视为无绑定（防御性，
+        // 实际上端口按 (app_type, profile_id) 分配，不会跨 app）。
         let profile_id: Option<&str> = state
             .profile_binding
             .as_ref()
-            .map(|(app, pid)| pid.as_str());
-        // 绑定档案的 app_type 必须与请求的 app_type 一致——否则视为无绑定（防御性，
-        // 实际上端口按 (app_type, profile_id) 分配，不会跨 app）。
-        let profile_id = profile_id
-            .filter(|_| state.profile_binding.as_ref().unwrap().0 == app_type_str);
+            .as_ref() // &Option<(String, String)>
+            .filter(|(app, _)| *app == app_type_str)
+            .map(|(_, pid)| pid.as_str());
         let providers = match profile_id {
             Some(pid) => {
                 state

@@ -111,7 +111,8 @@ pub async fn handle_models(State(state): State<ProxyState>) -> Result<Json<Value
 fn bound_profile_id(state: &ProxyState) -> Option<String> {
     state
         .profile_binding
-        .as_ref()
+        .as_ref() // &Arc<Option<...>>
+        .as_ref() // Option<&(String, String)>
         .map(|(_app, pid)| pid.clone())
 }
 
