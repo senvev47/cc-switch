@@ -48,6 +48,7 @@ import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { useScanUnmanagedSkills } from "@/hooks/useSkills";
+import { ProfileSwitcherBar } from "@/components/proxy/ProfileSwitcherBar";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { isTextEditableTarget } from "@/utils/domUtils";
 import { deepClone } from "@/utils/deepClone";
@@ -1000,6 +1001,7 @@ function App() {
             <div className="px-6">
               <div className="px-1 pb-12">
                 <div key={activeApp} className="space-y-4">
+                  <ProfileSwitcherBar appType={activeApp} />
                   <ProviderList
                     providers={providers}
                     currentProviderId={currentProviderId}

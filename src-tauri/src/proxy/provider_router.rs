@@ -220,7 +220,7 @@ impl ProviderRouter {
         //     （共享队列 + offset 偏移），即既有行为，零回归。
         if self.db.app_has_failover_profiles(app_type)? {
             return self
-                .select_providers_for_profile(app_type, session_id, &routing_config)
+                .select_providers_for_profile(app_type, session_id)
                 .await;
         }
 
@@ -340,7 +340,6 @@ impl ProviderRouter {
         &self,
         app_type: &str,
         session_id: &str,
-        routing_config: &crate::proxy::types::PerTerminalRoutingConfig,
     ) -> Result<Vec<Provider>, AppError> {
         let session_key = format!("{app_type}:{session_id}");
 
@@ -395,105 +394,30 @@ impl ProviderRouter {
                 .await;
         }
 
-        // 3. 未命中或绑定已失效 → 按用户预设的「下一个新终端档案」派发。
+        // 3. 「档案即端口」模型下，主端口（本函数）不再做推断式档案绑定。
+        //
+        // 历史：本段曾读 `next_new_terminal_profile_id` 预设，把裸 baseUrl(15721) 的
+        // 新终端绑定到某命名档案。这会造成「旧终端用了新档案的路由列表」——主端口
+        // 终端的 baseUrl 与档案端口(15722+)不同，但预设让它路由到档案成员，行为与
+        // baseUrl 不一致，且无法在客户端层面隔离。
+        //
+        // 现在：命名档案只能通过其专属端口生效（`select_providers_for_explicit_profile`，
+        // 由 `open_profile_terminal` 启动端口 server 触发）。主端口终端一律走默认共享队列，
+        // 与 baseUrl 语义一致，彻底不串扰。预设字段保留（前端可能仍写入），但读路径忽略。
         let profiles = self.db.list_failover_profiles(app_type)?;
         let named: Vec<&String> = profiles
             .iter()
             .filter_map(|p| p.profile_id.as_ref())
             .collect();
         if named.is_empty() {
-            // 理论不达（外层已确认 app_has_failover_profiles），防御性退化。
+            // 该 app 无命名档案 → 默认共享队列（既有路径）。
             return self.select_providers(app_type).await;
         }
-
-        // 读取用户预设：None → 默认共享队列（既有路径）；Some(id) → 该命名档案。
-        // 若指向的档案已被删除，视为无效，按 None 处理并清回（无效数据清理，
-        // 非覆盖用户意图）。
-        //
-        // **持久保留语义**（用户要求）：预设**不**在新终端绑定时清回 None，
-        // 而是一直保留到用户手动更改。这样用户设一次后，每个新开的终端都会
-        // 绑定到该档案，直到用户在前端改成另一个档案或「默认共享队列」。
-        // 读取该 app 的预设：无预设 → 默认共享队列（既有路径）。
-        //
-        // 预设按 app_type 分键（见 `PerTerminalRoutingConfig`）。同时兼容旧版的全局
-        // 单值字段：若该 app 无键而旧字段有值，只有当那个档案确实属于本 app 时才采用，
-        // 否则忽略——旧字段可能存的是另一个 app 的档案 id。**不写回配置**。
-        let preset_id: Option<String> = routing_config
-            .preset_for(app_type)
-            .map(str::to_string)
-            .or_else(|| {
-                routing_config
-                    .next_new_terminal_profile_id
-                    .as_deref()
-                    .filter(|legacy| named.iter().any(|n| n.as_str() == *legacy))
-                    .map(str::to_string)
-            });
-        let preset_valid = preset_id
-            .as_deref()
-            .map(|pid| named.iter().any(|n| n.as_str() == pid))
-            .unwrap_or(false);
-
-        if let Some(pid) = preset_id {
-            if preset_valid {
-                // 派发到该命名档案。预设不清回（持久保留，用户手动调节）。
-                let ordered_ids = self.db.get_failover_profile_member_ids(app_type, Some(&pid))?;
-                if ordered_ids.is_empty() {
-                    log::warn!(
-                        "[{app_type}] 按终端路由：会话 {session_id} 预设档案 {pid} 成员为空，退化"
-                    );
-                    return self.select_providers(app_type).await;
-                }
-                // 写入新绑定（含内存卫生）。
-                {
-                    let mut routes = self.session_routes.write().await;
-                    if routes.len() >= MAX_SESSION_ROUTES {
-                        routes.retain(|_, route| route.last_used.elapsed() < SESSION_ROUTE_TTL);
-                        while routes.len() >= MAX_SESSION_ROUTES {
-                            if let Some(oldest_key) = routes
-                                .iter()
-                                .min_by_key(|(_, route)| route.last_used)
-                                .map(|(k, _)| k.clone())
-                            {
-                                routes.remove(&oldest_key);
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    routes.insert(
-                        session_key.clone(),
-                        SessionRoute {
-                            queue_len_at_bind: 0,
-                            offset: 0,
-                            last_used: Instant::now(),
-                            profile_id: Some(pid.clone()),
-                        },
-                    );
-                }
-                let all_providers = self.db.get_all_providers(app_type)?;
-                log::info!(
-                    "[{app_type}] 按终端路由：会话 {session_id} 按预设绑定档案 {pid} (members={})",
-                    ordered_ids.len()
-                );
-                let qlen = ordered_ids.len();
-                return self
-                    .rotate_providers(app_type, ordered_ids, &all_providers, 0, qlen)
-                    .await;
-            } else {
-                // 预设指向该 app 下不存在的档案：**只记日志，不动用户配置**。
-                //
-                // 这里是代理的读路径；早先版本在此把配置持久化清空，属于读路径的破坏性
-                // 副作用，且配合"全局单值预设 + 按 app 归属的档案 id"会导致跨应用互相
-                // 清空。按无预设处理即可——用户的选择留在配置里，档案恢复后自动继续生效。
-                log::warn!(
-                    "[{app_type}] 按终端路由：会话 {session_id} 的预设档案 {} 不属于该应用或已被删除，本次按默认共享队列处理（未改动配置）",
-                    pid
-                );
-            }
-        }
-
-        // 4. 无预设（或预设无效）→ 退化为默认共享队列（既有路径）。
-        //    不写入任何 profile_id 绑定，避免把"未显式选择"的终端锁死到某个档案。
+        // 有命名档案但主端口不做绑定：直接退化为默认共享队列。
+        // 不写入 session_routes 绑定，避免把"未显式选择"的终端锁死到某个档案。
+        log::debug!(
+            "[{app_type}] 按终端路由：主端口会话 {session_id} 走默认共享队列（命名档案仅经专属端口生效）"
+        );
         self.select_providers(app_type).await
     }
 
