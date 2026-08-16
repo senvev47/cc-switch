@@ -22,6 +22,7 @@ import {
   ArrowUp,
   ArrowDown,
   AlertTriangle,
+  SquareTerminal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +36,7 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import type { AppId } from "@/lib/api";
+import { failoverProfilesApi } from "@/lib/api/failoverProfiles";
 import {
   useFailoverProfiles,
   useFailoverProfileMembers,
@@ -44,8 +46,10 @@ import {
   useAddProviderToFailoverProfile,
   useRemoveProviderFromFailoverProfile,
   useReorderFailoverProfileMembers,
+  toNamedFailoverProfiles,
 } from "@/lib/query/failoverProfiles";
 import { useAvailableProvidersForFailover } from "@/lib/query/failover";
+import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBadge";
 import { settingsApi, type PerTerminalRoutingConfig } from "@/lib/api/settings";
 
 interface FailoverProfilesPanelProps {
@@ -68,15 +72,20 @@ export function FailoverProfilesPanel({
     null,
   );
   const [savingPreset, setSavingPreset] = useState(false);
+  /** 正在打开终端的档案 id（用于按钮 loading / 禁用）。 */
+  const [openingTerminalId, setOpeningTerminalId] = useState<string | null>(
+    null,
+  );
 
   const { data: profiles, isLoading: profilesLoading } =
     useFailoverProfiles(appType);
+  // 与供应商卡片上的档案徽章共用同一份排序与配色索引
   const namedProfiles = useMemo(
-    () => (profiles ?? []).filter((p) => !!p.profileId),
+    () => toNamedFailoverProfiles(profiles),
     [profiles],
   );
 
-  // 加载按终端路由配置（用于「下一个新终端使用哪个档案」预设）。
+  // 加载按终端路由配置（用于「新终端使用哪个档案」预设）。
   useEffect(() => {
     settingsApi
       .getPerTerminalRoutingConfig()
@@ -84,11 +93,22 @@ export function FailoverProfilesPanel({
       .catch((e) => console.error("Failed to load routing config:", e));
   }, []);
 
+  /** 当前应用的「新终端使用哪个档案」预设（缺省 = 默认共享队列）。 */
+  const nextProfileIdForApp =
+    routingConfig?.nextNewTerminalProfileIdByApp?.[appType] ?? null;
+
   const handleSetNextProfile = async (profileId: string | null) => {
     if (!routingConfig) return;
+    // 只改当前 appType 的键，保留其它应用的预设
+    const byApp = { ...(routingConfig.nextNewTerminalProfileIdByApp ?? {}) };
+    if (profileId) {
+      byApp[appType] = profileId;
+    } else {
+      delete byApp[appType];
+    }
     const next: PerTerminalRoutingConfig = {
       ...routingConfig,
-      nextNewTerminalProfileId: profileId,
+      nextNewTerminalProfileIdByApp: byApp,
     };
     setSavingPreset(true);
     try {
@@ -200,6 +220,40 @@ export function FailoverProfilesPanel({
     }
   };
 
+  /** 打开一个绑定到该档案的终端：先选工作目录，再调用后端。 */
+  const handleOpenTerminal = async (profileId: string) => {
+    if (openingTerminalId) return;
+    let cwd: string | null = null;
+    try {
+      cwd = await settingsApi.pickDirectory();
+    } catch (error) {
+      toast.error(
+        t("proxy.failoverProfiles.openTerminalFailed", "打开终端失败") +
+          ": " +
+          String(error),
+      );
+      return;
+    }
+    // 用户取消选择目录 → 静默中止
+    if (!cwd) return;
+    setOpeningTerminalId(profileId);
+    try {
+      await failoverProfilesApi.openProfileTerminal(appType, profileId, cwd);
+      toast.success(
+        t("proxy.failoverProfiles.openTerminalSuccess", "已打开绑定该档案的终端"),
+        { closeButton: true },
+      );
+    } catch (error) {
+      toast.error(
+        t("proxy.failoverProfiles.openTerminalFailed", "打开终端失败") +
+          ": " +
+          String(error),
+      );
+    } finally {
+      setOpeningTerminalId(null);
+    }
+  };
+
   const handleAddProvider = async () => {
     if (!effectiveActive || !selectedProviderId) return;
     try {
@@ -291,11 +345,7 @@ export function FailoverProfilesPanel({
               </p>
             </div>
             <Select
-              value={
-                routingConfig.nextNewTerminalProfileId
-                  ? routingConfig.nextNewTerminalProfileId
-                  : "__default__"
-              }
+              value={nextProfileIdForApp ?? "__default__"}
               onValueChange={(v) =>
                 handleSetNextProfile(v === "__default__" ? null : v)
               }
@@ -314,7 +364,7 @@ export function FailoverProfilesPanel({
                   )}
                 </SelectItem>
                 {namedProfiles.map((p) => (
-                  <SelectItem key={p.profileId} value={p.profileId!}>
+                  <SelectItem key={p.profileId} value={p.profileId}>
                     {p.name}
                   </SelectItem>
                 ))}
@@ -387,7 +437,7 @@ export function FailoverProfilesPanel({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setActiveProfileId(p.profileId!)}
+                    onClick={() => setActiveProfileId(p.profileId)}
                     className="flex-1 min-w-0 text-left"
                   >
                     {renamingId === p.profileId ? (
@@ -395,9 +445,9 @@ export function FailoverProfilesPanel({
                         value={renameValue}
                         autoFocus
                         onChange={(e) => setRenameValue(e.target.value)}
-                        onBlur={() => handleRename(p.profileId!)}
+                        onBlur={() => handleRename(p.profileId)}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter") handleRename(p.profileId!);
+                          if (e.key === "Enter") handleRename(p.profileId);
                           if (e.key === "Escape") setRenamingId(null);
                         }}
                         className="h-7"
@@ -419,8 +469,26 @@ export function FailoverProfilesPanel({
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7"
+                    onClick={() => handleOpenTerminal(p.profileId)}
+                    disabled={disabled || openingTerminalId !== null}
+                    aria-label="open terminal"
+                    title={t(
+                      "proxy.failoverProfiles.openTerminal",
+                      "打开绑定该档案的终端（先选择工作目录）",
+                    )}
+                  >
+                    {openingTerminalId === p.profileId ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <SquareTerminal className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
                     onClick={() => {
-                      setRenamingId(p.profileId!);
+                      setRenamingId(p.profileId);
                       setRenameValue(p.name);
                     }}
                     disabled={disabled}
@@ -432,7 +500,7 @@ export function FailoverProfilesPanel({
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                    onClick={() => handleDelete(p.profileId!)}
+                    onClick={() => handleDelete(p.profileId)}
                     disabled={disabled || deleteProfile.isPending}
                     aria-label="delete"
                   >
@@ -505,9 +573,11 @@ export function FailoverProfilesPanel({
                             key={m.providerId}
                             className="flex items-center gap-2 rounded border border-border/40 bg-background/40 px-2 py-1"
                           >
-                            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] font-medium">
-                              {idx + 1}
-                            </span>
+                            <FailoverPriorityBadge
+                              priority={idx + 1}
+                              colorIndex={p.colorIndex}
+                              profileName={p.name}
+                            />
                             <span className="flex-1 text-xs truncate">
                               {m.providerName}
                             </span>

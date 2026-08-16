@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// 代理服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,10 +341,17 @@ impl Default for CopilotOptimizerConfig {
 /// 独立的路由起点，而不是共享同一条 P1→P2→… 故障转移链。详见
 /// `ProviderRouter::select_providers_for_session`。
 ///
-/// 档案模式下的绑定语义：用户在 `next_new_terminal_profile_id` 指定新终端要
-/// 绑定到哪个命名档案（`None` = 默认共享队列）。该预设**持久保留**——每个新开
-/// 终端都会绑定到该档案，直到用户手动改成另一个档案或「默认共享队列」。后端
-/// 唯一会清回 `None` 的情形：预设指向的档案已被删除（无效数据清理）。
+/// 档案模式下的绑定语义：用户为**每个 app_type** 分别指定新终端要绑定到哪个命名
+/// 档案（该 app 无键 = 默认共享队列）。预设**持久保留**——每个新开终端都会绑定到
+/// 该档案，直到用户手动改成另一个档案或「默认共享队列」。
+///
+/// # 为什么按 app_type 分键
+///
+/// 本配置是**全局单例**（settings 表一行），而档案 id 的主键是 `(id, app_type)`，
+/// 只归属一个应用。早先版本用单个 `next_new_terminal_profile_id` 存放预设，于是
+/// 当用户同时为 claude 与 codex 建了命名档案时，一个应用的请求会拿另一个应用的
+/// 档案 id 去自己的档案集合里校验、判定「档案已被删除」，并把用户的预设清空——
+/// 跨应用互相清空。按 app_type 分键从类型上消除了这个缺陷。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PerTerminalRoutingConfig {
@@ -351,20 +359,35 @@ pub struct PerTerminalRoutingConfig {
     /// `select_providers`，行为与历史版本完全一致，零回归风险。
     #[serde(default = "default_false")]
     pub enabled: bool,
-    /// 新终端绑定的命名档案 id（持久保留，直到用户手动更改）。
+    /// 各 app_type 下「新终端绑定哪个命名档案」的预设，持久保留直到用户手动更改。
     ///
-    /// - `None`（默认）：新终端绑定到默认档案（共享队列，既有路径）。
-    /// - `Some(id)`：新终端绑定到该命名档案。**不会**在绑定后自动清回——每个
-    ///   新开终端都绑定到该档案，直到用户在前端改成另一个档案或「默认共享队列」。
-    ///   指向的档案若已被删除，绑定时该值被视为无效、清回 `None` 并按默认处理。
+    /// key = app_type（如 `"claude"` / `"codex"`），value = 命名档案 id。
+    /// 某 app 无对应键 = 该 app 的新终端走默认档案（共享队列，既有路径）。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub next_new_terminal_profile_id_by_app: HashMap<String, String>,
+    /// **已弃用**：旧版的全局单值预设，仅为读取历史配置保留。
+    ///
+    /// 反序列化时若新 map 为空而此字段有值，`ProviderRouter` 会把它迁移到新 map
+    /// （按档案 id 反查其所属 app_type），从而不丢用户已有的选择。迁移后不再写出
+    /// （`skip_serializing_if`），旧键自然消失。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_new_terminal_profile_id: Option<String>,
+}
+
+impl PerTerminalRoutingConfig {
+    /// 取某 app 的预设档案 id。
+    pub fn preset_for(&self, app_type: &str) -> Option<&str> {
+        self.next_new_terminal_profile_id_by_app
+            .get(app_type)
+            .map(String::as_str)
+    }
 }
 
 impl Default for PerTerminalRoutingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            next_new_terminal_profile_id_by_app: HashMap::new(),
             next_new_terminal_profile_id: None,
         }
     }

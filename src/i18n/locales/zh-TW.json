@@ -2583,7 +2583,8 @@
     "inQueue": "已加入",
     "addQueue": "加入",
     "priority": {
-      "tooltip": "故障轉移優先順序 {{priority}}"
+      "tooltip": "故障轉移優先順序 {{priority}}",
+      "profileTooltip": "{{profileName}} · P{{priority}}"
     },
     "tooltip": {
       "enabled": "{{app}} 故障轉移已啟用\n按佇列優先順序（P1→P2→...）選擇供應商",

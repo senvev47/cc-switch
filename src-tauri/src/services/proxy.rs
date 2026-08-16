@@ -19,7 +19,7 @@ use tauri::Emitter;
 use tokio::sync::RwLock;
 
 /// 用于接管 Live 配置时的占位符（避免客户端提示缺少 key，同时不泄露真实 Token）
-const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
+pub const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
 
 /// 代理接管模式下需要从 Claude Live 配置中移除的"模型覆盖"字段。
 ///
@@ -1510,6 +1510,23 @@ impl ProxyService {
         let proxy_codex_base_url = format!("{}/v1", proxy_origin.trim_end_matches('/'));
 
         Ok((proxy_url, proxy_codex_base_url))
+    }
+
+    /// 「档案即端点」：某命名故障转移档案对应的客户端 base URL。
+    ///
+    /// 返回 `(claude_base, codex_base)`：
+    ///   - claude 系（Anthropic 协议）直接用 `<origin>/p/<profile_id>`，客户端 SDK 会在
+    ///     其后拼 `/v1/messages`（base URL 的路径部分是字符串拼接，会被保留）；
+    ///   - codex 系沿用其惯例，多带一层 `/v1`。
+    ///
+    /// 终端用哪个 base URL 就属于哪个档案——绑定显式、无状态、确定，不依赖会话标识。
+    pub async fn profile_base_urls(&self, profile_id: &str) -> Result<(String, String), String> {
+        let (proxy_url, _) = self.build_proxy_urls().await?;
+        let origin = proxy_url.trim_end_matches('/');
+        Ok((
+            format!("{origin}/p/{profile_id}"),
+            format!("{origin}/p/{profile_id}/v1"),
+        ))
     }
 
     /// Grok Build live 是否具备可接管的自定义模型表。

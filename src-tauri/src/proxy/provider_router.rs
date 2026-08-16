@@ -190,7 +190,7 @@ impl ProviderRouter {
         client_provided: bool,
     ) -> Result<Vec<Provider>, AppError> {
         // 1. 读取按终端路由配置；失败或关闭时直接退化为全局选择，零回归。
-        let mut routing_config = self.db.get_per_terminal_routing_config().unwrap_or_default();
+        let routing_config = self.db.get_per_terminal_routing_config().unwrap_or_default();
         if !routing_config.enabled {
             return self.select_providers(app_type).await;
         }
@@ -220,7 +220,7 @@ impl ProviderRouter {
         //     （共享队列 + offset 偏移），即既有行为，零回归。
         if self.db.app_has_failover_profiles(app_type)? {
             return self
-                .select_providers_for_profile(app_type, session_id, &mut routing_config)
+                .select_providers_for_profile(app_type, session_id, &routing_config)
                 .await;
         }
 
@@ -323,20 +323,24 @@ impl ProviderRouter {
     /// 命名路由档案模式下的按终端选择（Feature #2 升级）。
     ///
     /// 仅当该应用存在命名档案时被 `select_providers_for_session` 调用。每个会话
-    /// 绑定到一个档案 id：命中已有绑定且档案仍存在则复用；否则按用户预设的
-    /// `next_new_terminal_profile_id` 派发（`None` = 默认共享队列）。档案成员序列
-    /// 实时从 DB 读取（始终最新，无需版本字段）；档案被删除或成员变空时重新派发。
-    /// 熔断器 key 仍为 `app_type:provider_id`，与全局路径一致。
+    /// 绑定到一个档案 id：命中已有绑定且档案仍存在则复用；否则按用户为**该 app**
+    /// 预设的档案派发（无预设 = 默认共享队列）。档案成员序列实时从 DB 读取（始终
+    /// 最新，无需版本字段）；档案被删除或成员变空时重新派发。熔断器 key 仍为
+    /// `app_type:provider_id`，与全局路径一致。
     ///
-    /// **持久保留语义**（用户要求）：预设 `next_new_terminal_profile_id` **不**在
-    /// 新终端绑定时清回 `None`——它一直保留，每个新开终端都绑定到该档案，直到
-    /// 用户在前端手动改成另一个档案或「默认共享队列」。唯一会被后端清回的情形：
-    /// 预设指向的档案已被删除（无效数据清理，非覆盖用户显式选择）。
+    /// **持久保留语义**（用户要求）：预设**不**在新终端绑定时清空——它一直保留，
+    /// 每个新开终端都绑定到该档案，直到用户在前端手动改成另一个档案或「默认共享
+    /// 队列」。
+    ///
+    /// **不在请求路径上写用户配置**：预设失效（指向的档案不存在）时只记日志并按
+    /// 「无预设」处理。早先版本会在此处把配置持久化清空，那是读路径的破坏性副作用；
+    /// 又因为预设当时是全局单值而档案 id 按 app 归属，跨应用流量会互相把对方的预设
+    /// 清掉（用户可见症状：设好的「新终端使用某档案」莫名恢复默认）。
     async fn select_providers_for_profile(
         &self,
         app_type: &str,
         session_id: &str,
-        routing_config: &mut crate::proxy::types::PerTerminalRoutingConfig,
+        routing_config: &crate::proxy::types::PerTerminalRoutingConfig,
     ) -> Result<Vec<Provider>, AppError> {
         let session_key = format!("{app_type}:{session_id}");
 
@@ -409,7 +413,21 @@ impl ProviderRouter {
         // **持久保留语义**（用户要求）：预设**不**在新终端绑定时清回 None，
         // 而是一直保留到用户手动更改。这样用户设一次后，每个新开的终端都会
         // 绑定到该档案，直到用户在前端改成另一个档案或「默认共享队列」。
-        let preset_id = routing_config.next_new_terminal_profile_id.clone();
+        // 读取该 app 的预设：无预设 → 默认共享队列（既有路径）。
+        //
+        // 预设按 app_type 分键（见 `PerTerminalRoutingConfig`）。同时兼容旧版的全局
+        // 单值字段：若该 app 无键而旧字段有值，只有当那个档案确实属于本 app 时才采用，
+        // 否则忽略——旧字段可能存的是另一个 app 的档案 id。**不写回配置**。
+        let preset_id: Option<String> = routing_config
+            .preset_for(app_type)
+            .map(str::to_string)
+            .or_else(|| {
+                routing_config
+                    .next_new_terminal_profile_id
+                    .as_deref()
+                    .filter(|legacy| named.iter().any(|n| n.as_str() == *legacy))
+                    .map(str::to_string)
+            });
         let preset_valid = preset_id
             .as_deref()
             .map(|pid| named.iter().any(|n| n.as_str() == pid))
@@ -462,21 +480,71 @@ impl ProviderRouter {
                     .rotate_providers(app_type, ordered_ids, &all_providers, 0, qlen)
                     .await;
             } else {
-                // 预设指向已删除的档案：清回 None，避免残留无效预设（这是数据清理，
-                // 不是覆盖用户的显式选择——档案已不存在，用户的选择已无意义）。
-                routing_config.next_new_terminal_profile_id = None;
-                if let Err(e) = self.db.set_per_terminal_routing_config(routing_config) {
-                    log::warn!("[{app_type}] 持久化无效预设清空失败: {e}");
-                }
+                // 预设指向该 app 下不存在的档案：**只记日志，不动用户配置**。
+                //
+                // 这里是代理的读路径；早先版本在此把配置持久化清空，属于读路径的破坏性
+                // 副作用，且配合"全局单值预设 + 按 app 归属的档案 id"会导致跨应用互相
+                // 清空。按无预设处理即可——用户的选择留在配置里，档案恢复后自动继续生效。
                 log::warn!(
-                    "[{app_type}] 按终端路由：会话 {session_id} 预设档案已失效（被删除），退化默认"
+                    "[{app_type}] 按终端路由：会话 {session_id} 的预设档案 {} 不属于该应用或已被删除，本次按默认共享队列处理（未改动配置）",
+                    pid
                 );
             }
         }
 
-        // 4. 无预设（或预设无效已清空）→ 退化为默认共享队列（既有路径）。
+        // 4. 无预设（或预设无效）→ 退化为默认共享队列（既有路径）。
         //    不写入任何 profile_id 绑定，避免把"未显式选择"的终端锁死到某个档案。
         self.select_providers(app_type).await
+    }
+
+    /// 「档案即端点」：按 URL 里显式声明的档案选择 provider 链。
+    ///
+    /// 与 `select_providers_for_session` 的**推断**式绑定相对——终端用哪个 base URL
+    /// （`http://127.0.0.1:PORT/p/<profile_id>`）就属于哪个档案，绑定显式、无状态、
+    /// 确定。因此本函数：
+    ///   - **不读** `PerTerminalRoutingConfig.enabled`（门 1）：使用带前缀的 base URL
+    ///     本身就是显式 opt-in；
+    ///   - **不要求** `client_provided`（门 3）：不依赖会话标识；
+    ///   - **不读写** `session_routes`：无需绑定表，也就不涉及 TTL / 容量驱逐；
+    ///   - **不读** `next_new_terminal_profile_id` 预设。
+    ///
+    /// 仍与全局路径共享熔断器 key（`app_type:provider_id`，见 `rotate_providers`），
+    /// 故熔断状态与健康统计不会因档案而分裂。
+    ///
+    /// 自动故障转移开关（门 2）此处**不影响 provider 选择**，但仍实质生效于重试：
+    /// 关闭时 `RequestContext::create_forwarder` 会强制 `max_retries = 0`，档案链只会
+    /// 尝试 P1 一家。即「档案决定顺序，故障转移开关决定是否往后走」。
+    ///
+    /// 档案不存在 / 不属于该 app / 成员为空时**返回错误而非退化到全局供应商**——
+    /// 用户显式指定了档案，静默改路由比报错更糟。
+    pub async fn select_providers_for_explicit_profile(
+        &self,
+        app_type: &str,
+        profile_id: &str,
+    ) -> Result<Vec<Provider>, AppError> {
+        if !self.db.failover_profile_exists(app_type, profile_id)? {
+            log::warn!(
+                "[{app_type}] [FO-006] 档案端点 /p/{profile_id} 指向的档案不存在或不属于该应用"
+            );
+            return Err(AppError::NoProvidersConfigured);
+        }
+
+        // 成员每请求实时读 DB：档案成员的增删/重排即时生效，无需版本号或失效标记。
+        let ordered_ids = self
+            .db
+            .get_failover_profile_member_ids(app_type, Some(profile_id))?;
+        if ordered_ids.is_empty() {
+            log::warn!("[{app_type}] [FO-006] 档案端点 /p/{profile_id} 的档案成员为空");
+            return Err(AppError::NoProvidersConfigured);
+        }
+
+        let all_providers = self.db.get_all_providers(app_type)?;
+        let queue_len = ordered_ids.len();
+        log::info!(
+            "[{app_type}] 档案端点：/p/{profile_id} (members={queue_len})"
+        );
+        self.rotate_providers(app_type, ordered_ids, &all_providers, 0, queue_len)
+            .await
     }
 
     /// 按 offset 轮转 `ordered_ids`，再走与 `select_providers` 完全一致的熔断器过滤。

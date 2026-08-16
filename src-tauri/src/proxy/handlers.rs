@@ -44,10 +44,56 @@ use super::{
 };
 use crate::app_config::AppType;
 use crate::database::PRICING_SOURCE_REQUEST;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+
+// ============================================================================
+// 档案端点（「档案即端点」）
+// ============================================================================
+
+/// `/p/:profile_id` 前缀捕获到的路径参数。
+///
+/// **必须是 `Option<Path<HashMap<..>>>`，不能是 `Path<String>`**：同一套 handler 同时
+/// 挂在裸路径与 `/p/:profile_id` 之下（见 `server::ProxyServer::build_router`），裸路径
+/// 下没有 `profile_id` 捕获，`Path<String>` 会直接拒绝请求。用 `HashMap` 而非具名结构
+/// 还能避免与 Gemini 路由的 `*path` 捕获抢位（该路由在前缀下同时有两个捕获）。
+///
+/// 提取器顺序：本类型实现 `FromRequestParts`，必须放在 `axum::extract::Request`
+/// （`FromRequest`）**之前**。
+pub type ProfileParams = Option<axum::extract::Path<std::collections::HashMap<String, String>>>;
+
+/// 从路径捕获中取出档案 id；裸路径挂载下返回 `None`。
+fn profile_id_of(params: &ProfileParams) -> Option<String> {
+    params
+        .as_ref()
+        .and_then(|Path(map)| map.get("profile_id"))
+        .filter(|id| !id.is_empty())
+        .cloned()
+}
+
+/// 防御性剥离 `/p/<profile_id>` 前缀。
+///
+/// `Router::nest` 正常已为内层 handler 剥掉前缀，本函数是双保险：Claude 与 Gemini
+/// 两条链路会把入站路径原样拼到上游 URL 上，前缀一旦泄漏就会打到上游的错误路径。
+/// 只在确实带该前缀且其后是路径/查询边界时才剥离，避免误伤形如 `/p/xyz-something`
+/// 的正常路径。
+fn strip_profile_prefix<'a>(endpoint: &'a str, profile_id: Option<&str>) -> &'a str {
+    let Some(pid) = profile_id else {
+        return endpoint;
+    };
+    endpoint
+        .strip_prefix("/p/")
+        .and_then(|rest| rest.strip_prefix(pid))
+        .filter(|rest| rest.is_empty() || rest.starts_with('/') || rest.starts_with('?'))
+        .unwrap_or(endpoint)
+}
 
 // ============================================================================
 // 健康检查和状态查询（简单端点）
@@ -70,17 +116,143 @@ pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxySta
     Ok(Json(status))
 }
 
-/// GET /v1/models — Codex model list (reachability check)
+/// GET /v1/models — Codex model list (reachability check)，以及
+/// GET /p/&lt;profile_id&gt;/v1/models — 按命名档案下发模型列表。
 ///
-/// Codex CLI probes this endpoint at startup and deserializes the response as a
-/// catalog with a top-level `models` field.  Return the cc-switch–managed model
-/// catalog file directly so the format always matches what the current version
-/// of Codex expects.
+/// **裸路径行为完全不变**：Codex CLI 在启动时探测该端点并按顶层 `models` 字段解析，
+/// 因此直接回传 cc-switch 管理的模型目录文件，且仅在 live config.toml 仍指向
+/// cc-switch 拥有的 `model_catalog_json` 时才服务（与 Codex live 设置导入同一套
+/// 路径归属规则）。
 ///
-/// Only serves the catalog when the live config.toml still references the
-/// cc-switch–owned `model_catalog_json`, using the same path ownership rules as
-/// Codex live-setting import.
-pub async fn handle_models() -> Result<Json<Value>, ProxyError> {
+/// **带 `/p/<profile_id>` 前缀时**改为按该档案的 P1 provider 下发列表。claude code 在
+/// 设置 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 后会向 `{base_url}/v1/models`
+/// 拉取模型并并入 `/model` 选择器（标注 "From gateway"），其缓存按 baseUrl 分键，
+/// 所以不同档案的终端天然互不污染。
+///
+/// 注意 claude code 侧的三条硬约束：
+///   1. 它只保留 id 匹配 `/(claude|anthropic)/i` 的条目，其余**会被丢弃**——所以
+///      wire id 用 `claude-*` 别名、真实上游名放 `display_name`（与
+///      `ANTHROPIC_DEFAULT_*_MODEL` / `*_MODEL_NAME` 的分工一致）；
+///   2. 探测超时 3 秒；
+///   3. `redirect: "error"`——本端点**不得**重定向。
+pub async fn handle_models(
+    State(state): State<ProxyState>,
+    params: ProfileParams,
+) -> Result<Json<Value>, ProxyError> {
+    if let Some(profile_id) = profile_id_of(&params) {
+        return handle_profile_models(&state, &profile_id).await;
+    }
+    Ok(Json(codex_reachability_catalog()))
+}
+
+/// 按档案下发模型列表（`/p/<profile_id>/v1/models`）。
+///
+/// 档案 id 唯一归属一个 app（主键 `(id, app_type)`），故可由 id 反查所属应用，
+/// 再按该应用的协议给出对应形状：claude 系走 Anthropic `/v1/models` 的
+/// `{"data":[...]}`，codex 系沿用其静态目录形状。
+async fn handle_profile_models(
+    state: &ProxyState,
+    profile_id: &str,
+) -> Result<Json<Value>, ProxyError> {
+    let app_type = state
+        .db
+        .failover_profile_app_type(profile_id)
+        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?
+        .ok_or_else(|| {
+            log::warn!("[models] 档案端点 /p/{profile_id} 指向的档案不存在");
+            ProxyError::NoProvidersConfigured
+        })?;
+
+    // Codex 系的模型目录不是按 provider 派生的，沿用既有静态目录（形状必须保持
+    // 顶层 `models`，否则 Codex CLI 解析失败）。
+    if !app_type.starts_with("claude") {
+        return Ok(Json(codex_reachability_catalog()));
+    }
+
+    let providers = state
+        .provider_router
+        .select_providers_for_explicit_profile(&app_type, profile_id)
+        .await
+        .map_err(|e| match e {
+            crate::error::AppError::AllProvidersCircuitOpen => ProxyError::AllProvidersCircuitOpen,
+            crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
+            other => ProxyError::DatabaseError(other.to_string()),
+        })?;
+    let provider = providers.first().ok_or(ProxyError::NoAvailableProvider)?;
+
+    log::debug!(
+        "[models] 档案端点 /p/{profile_id} → provider {} (app={app_type})",
+        provider.name
+    );
+    Ok(Json(claude_model_list_from_provider(provider)))
+}
+
+/// Claude 系角色别名 → 该 provider 的 `*_MODEL` / `*_MODEL_NAME` 环境变量键。
+const CLAUDE_ROLE_MODEL_ENV_KEYS: [(&str, &str); 4] = [
+    ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "Haiku"),
+    ("ANTHROPIC_DEFAULT_SONNET_MODEL", "Sonnet"),
+    ("ANTHROPIC_DEFAULT_OPUS_MODEL", "Opus"),
+    ("ANTHROPIC_DEFAULT_FABLE_MODEL", "Fable"),
+];
+
+/// 由 provider 的 env 角色键构造 Anthropic `/v1/models` 形状的模型列表。
+///
+/// claude 侧**没有**结构化模型目录——一个 provider 的"模型"就是 `settings_config.env`
+/// 里的那几个字符串（`ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL` 是上线值，
+/// 同名 `_NAME` 是显示名）。因此这里直接按角色键投影，而不能复用 Claude Desktop 的
+/// `proxy_model_routes`（那依赖 Desktop 专属的 `meta.claude_desktop_model_routes`）。
+///
+/// **id 过滤**：claude code 只保留 id 匹配 `/(claude|anthropic)/i` 的条目。这里用更严格
+/// 的既有校验 `is_claude_safe_model_id`（要求 `claude-`/`anthropic.claude-` 前缀 + 角色
+/// 段），通过它的必然也能通过 claude code 的过滤。被跳过的条目**记日志**，不静默丢弃。
+fn claude_model_list_from_provider(provider: &crate::provider::Provider) -> Value {
+    let env = provider
+        .settings_config
+        .get("env")
+        .and_then(Value::as_object);
+
+    let mut data: Vec<Value> = Vec::new();
+    for (model_key, role) in CLAUDE_ROLE_MODEL_ENV_KEYS {
+        let Some(env) = env else { break };
+        let Some(wire_id) = env
+            .get(model_key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        if !crate::claude_desktop_config::is_claude_safe_model_id(wire_id) {
+            log::debug!(
+                "[models] 档案模型列表跳过 {role}={wire_id}：claude code 只接受含 claude/anthropic 的 id"
+            );
+            continue;
+        }
+        let display = env
+            .get(&format!("{model_key}_NAME"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(wire_id);
+        data.push(json!({
+            "type": "model",
+            "id": wire_id,
+            "display_name": display,
+        }));
+    }
+
+    let first_id = data.first().and_then(|m| m.get("id")).cloned();
+    let last_id = data.last().and_then(|m| m.get("id")).cloned();
+    json!({
+        "data": data,
+        "has_more": false,
+        "first_id": first_id,
+        "last_id": last_id,
+    })
+}
+
+/// Codex CLI 启动探活用的静态模型目录（裸 `/models` 与 `/v1/models` 的既有行为）。
+fn codex_reachability_catalog() -> Value {
     let config_dir = crate::codex_config::get_codex_config_dir();
     let active_catalog_path = match crate::codex_config::read_codex_config_text() {
         Ok(config_text) => {
@@ -107,7 +279,7 @@ pub async fn handle_models() -> Result<Json<Value>, ProxyError> {
         }
         json!({"models": []})
     };
-    Ok(Json(catalog))
+    catalog
 }
 
 // ============================================================================
@@ -121,13 +293,24 @@ pub async fn handle_models() -> Result<Json<Value>, ProxyError> {
 /// - 现在 OpenRouter 已推出 Claude Code 兼容接口，默认不再启用该转换（逻辑保留以备回退）
 pub async fn handle_messages(
     State(state): State<ProxyState>,
+    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
-    handle_messages_for_app(state, request, AppType::Claude, "Claude", "claude", None).await
+    handle_messages_for_app(
+        state,
+        request,
+        AppType::Claude,
+        "Claude",
+        "claude",
+        None,
+        profile_id_of(&params),
+    )
+    .await
 }
 
 pub async fn handle_claude_desktop_messages(
     State(state): State<ProxyState>,
+    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
     validate_claude_desktop_gateway_auth(&state, request.headers())?;
@@ -138,6 +321,7 @@ pub async fn handle_claude_desktop_messages(
         "Claude Desktop",
         "claude-desktop",
         Some("/claude-desktop"),
+        profile_id_of(&params),
     )
     .await
 }
@@ -165,6 +349,7 @@ async fn handle_messages_for_app(
     tag: &'static str,
     app_type_str: &'static str,
     strip_prefix: Option<&'static str>,
+    profile_id: Option<String>,
 ) -> Result<axum::response::Response, ProxyError> {
     let (parts, body) = request.into_parts();
     let method = parts.method.clone();
@@ -179,13 +364,22 @@ async fn handle_messages_for_app(
     let body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
 
-    let mut ctx =
-        RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+    let mut ctx = RequestContext::new(
+        &state,
+        &body,
+        &headers,
+        app_type.clone(),
+        tag,
+        app_type_str,
+        profile_id.as_deref(),
+    )
+    .await?;
 
     let raw_endpoint = uri
         .path_and_query()
         .map(|path_and_query| path_and_query.as_str())
         .unwrap_or(uri.path());
+    let raw_endpoint = strip_profile_prefix(raw_endpoint, profile_id.as_deref());
     let endpoint = strip_prefix
         .and_then(|prefix| raw_endpoint.strip_prefix(prefix))
         .unwrap_or(raw_endpoint);
@@ -702,8 +896,10 @@ fn decode_codex_request_body(
 /// 处理 /v1/chat/completions 请求（OpenAI Chat Completions API - Codex CLI）
 pub async fn handle_chat_completions(
     State(state): State<ProxyState>,
+    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
+    let profile_id = profile_id_of(&params);
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
     let uri = parts.uri;
@@ -718,8 +914,16 @@ pub async fn handle_chat_completions(
     let body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
 
-    let mut ctx =
-        RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
+    let mut ctx = RequestContext::new(
+        &state,
+        &body,
+        &headers,
+        AppType::Codex,
+        "Codex",
+        "codex",
+        profile_id.as_deref(),
+    )
+    .await?;
     let endpoint = endpoint_with_query(&uri, "/chat/completions");
 
     let is_stream = body
@@ -768,13 +972,23 @@ pub async fn handle_chat_completions(
 /// 处理 /v1/responses 请求（OpenAI Responses API - Codex CLI 透传）
 pub async fn handle_responses(
     State(state): State<ProxyState>,
+    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
-    handle_responses_for_app(state, request, AppType::Codex, "Codex", "codex").await
+    handle_responses_for_app(
+        state,
+        request,
+        AppType::Codex,
+        "Codex",
+        "codex",
+        profile_id_of(&params),
+    )
+    .await
 }
 
 pub async fn handle_grokbuild_responses(
     State(state): State<ProxyState>,
+    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
     handle_responses_for_app(
@@ -783,6 +997,7 @@ pub async fn handle_grokbuild_responses(
         AppType::GrokBuild,
         "Grok Build",
         "grokbuild",
+        profile_id_of(&params),
     )
     .await
 }
@@ -793,6 +1008,7 @@ async fn handle_responses_for_app(
     app_type: AppType,
     tag: &'static str,
     app_type_str: &'static str,
+    profile_id: Option<String>,
 ) -> Result<axum::response::Response, ProxyError> {
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
@@ -808,8 +1024,16 @@ async fn handle_responses_for_app(
     let body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
 
-    let mut ctx =
-        RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+    let mut ctx = RequestContext::new(
+        &state,
+        &body,
+        &headers,
+        app_type.clone(),
+        tag,
+        app_type_str,
+        profile_id.as_deref(),
+    )
+    .await?;
     let endpoint = endpoint_with_query(&uri, "/responses");
 
     let is_stream = body
@@ -905,13 +1129,23 @@ async fn handle_responses_for_app(
 /// 处理 /v1/responses/compact 请求（OpenAI Responses Compact API - Codex CLI 透传）
 pub async fn handle_responses_compact(
     State(state): State<ProxyState>,
+    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
-    handle_responses_compact_for_app(state, request, AppType::Codex, "Codex", "codex").await
+    handle_responses_compact_for_app(
+        state,
+        request,
+        AppType::Codex,
+        "Codex",
+        "codex",
+        profile_id_of(&params),
+    )
+    .await
 }
 
 pub async fn handle_grokbuild_responses_compact(
     State(state): State<ProxyState>,
+    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
     handle_responses_compact_for_app(
@@ -920,6 +1154,7 @@ pub async fn handle_grokbuild_responses_compact(
         AppType::GrokBuild,
         "Grok Build",
         "grokbuild",
+        profile_id_of(&params),
     )
     .await
 }
@@ -930,6 +1165,7 @@ async fn handle_responses_compact_for_app(
     app_type: AppType,
     tag: &'static str,
     app_type_str: &'static str,
+    profile_id: Option<String>,
 ) -> Result<axum::response::Response, ProxyError> {
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
@@ -945,8 +1181,16 @@ async fn handle_responses_compact_for_app(
     let body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
 
-    let mut ctx =
-        RequestContext::new(&state, &body, &headers, app_type.clone(), tag, app_type_str).await?;
+    let mut ctx = RequestContext::new(
+        &state,
+        &body,
+        &headers,
+        app_type.clone(),
+        tag,
+        app_type_str,
+        profile_id.as_deref(),
+    )
+    .await?;
     let endpoint = endpoint_with_query(&uri, "/responses/compact");
 
     let is_stream = body
@@ -1929,8 +2173,10 @@ fn compact_error_message(message: &str, max_chars: usize) -> String {
 pub async fn handle_gemini(
     State(state): State<ProxyState>,
     uri: axum::http::Uri,
+    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
+    let profile_id = profile_id_of(&params);
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
     let headers = parts.headers;
@@ -1950,15 +2196,25 @@ pub async fn handle_gemini(
     };
 
     // Gemini 的模型名称在 URI 中
-    let mut ctx = RequestContext::new(&state, &body, &headers, AppType::Gemini, "Gemini", "gemini")
-        .await?
-        .with_model_from_uri(&uri);
+    let mut ctx = RequestContext::new(
+        &state,
+        &body,
+        &headers,
+        AppType::Gemini,
+        "Gemini",
+        "gemini",
+        profile_id.as_deref(),
+    )
+    .await?
+    .with_model_from_uri(&uri);
 
     // 提取完整的路径和查询参数
     let endpoint = uri
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or(uri.path());
+    // Gemini 是逐字透传路径的那条链路，前缀一旦泄漏会直接打到上游错误路径。
+    let endpoint = strip_profile_prefix(endpoint, profile_id.as_deref());
 
     let is_stream = body
         .get("stream")

@@ -39,6 +39,19 @@ interface DragHandleProps {
   isDragging: boolean;
 }
 
+/**
+ * 命名档案徽章：供应商在某个命名故障转移档案中的位次 + 该档案的稳定配色索引。
+ * 由 ProviderList 依据档案成员列表算出；与默认共享队列徽章（failoverPriority）并列显示。
+ */
+export interface ProviderProfileBadge {
+  profileId: string;
+  profileName: string;
+  /** 该档案内的 1-based 位次。 */
+  priority: number;
+  /** 稳定配色索引（同一档案恒定同色）。 */
+  colorIndex: number;
+}
+
 interface ProviderCardProps {
   provider: Provider;
   isCurrent: boolean;
@@ -66,6 +79,8 @@ interface ProviderCardProps {
   dragHandleProps?: DragHandleProps;
   isAutoFailoverEnabled?: boolean; // 是否开启自动故障转移
   failoverPriority?: number; // 故障转移优先级（1 = P1, 2 = P2, ...）
+  /** 该供应商所属的命名档案徽章（可多个）。与接管/自动故障转移开关无关，档案成员关系本身即事实。 */
+  profileBadges?: ProviderProfileBadge[];
   isInFailoverQueue?: boolean; // 是否在故障转移队列中
   onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
   /** 命名故障转移档案（存在时，卡片"加入"按钮变为双选下拉）。 */
@@ -173,6 +188,7 @@ export function ProviderCard({
   dragHandleProps,
   isAutoFailoverEnabled = false,
   failoverPriority,
+  profileBadges,
   isInFailoverQueue = false,
   onToggleFailover,
   namedFailoverProfiles,
@@ -474,6 +490,16 @@ export function ProviderCard({
                 failoverPriority && (
                   <FailoverPriorityBadge priority={failoverPriority} />
                 )}
+
+              {/* 命名档案徽章：无需接管/自动故障转移，只要有档案成员关系就展示 */}
+              {profileBadges?.map((badge) => (
+                <FailoverPriorityBadge
+                  key={badge.profileId}
+                  priority={badge.priority}
+                  colorIndex={badge.colorIndex}
+                  profileName={badge.profileName}
+                />
+              ))}
 
               {isHermesReadOnly && (
                 <span

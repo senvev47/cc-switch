@@ -82,6 +82,8 @@ impl RequestContext {
     /// * `app_type` - 应用类型
     /// * `tag` - 日志标签
     /// * `app_type_str` - 应用类型字符串
+    /// * `profile_id` - 「档案即端点」：请求 URL 里 `/p/<profile_id>` 显式声明的命名
+    ///   故障转移档案。`None` 表示走裸路径（既有行为）。
     ///
     /// # Errors
     /// 返回 `ProxyError` 如果 Provider 选择失败
@@ -92,6 +94,7 @@ impl RequestContext {
         app_type: AppType,
         tag: &'static str,
         app_type_str: &'static str,
+        profile_id: Option<&str>,
     ) -> Result<Self, ProxyError> {
         let start_time = Instant::now();
 
@@ -133,21 +136,31 @@ impl RequestContext {
         // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
         //
-        // Feature #2（按终端路由）：传入已提取的 session_id 及其来源稳定性。
-        // 仅当 PerTerminalRoutingConfig 开启、该应用启用了自动故障转移、且
-        // session_id 来自客户端稳定标识（非临时生成的 UUID）时，才会按会话绑定起点；
-        // 否则 `select_providers_for_session` 内部退化为 `select_providers`，零回归。
-        let providers = state
-            .provider_router
-            .select_providers_for_session(app_type_str, &session_id, session_client_provided)
-            .await
-            .map_err(|e| match e {
-                crate::error::AppError::AllProvidersCircuitOpen => {
-                    ProxyError::AllProvidersCircuitOpen
-                }
-                crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
-                _ => ProxyError::DatabaseError(e.to_string()),
-            })?;
+        // 两条路：
+        //   1. 「档案即端点」：请求走 `/p/<profile_id>/...`，档案由 URL 显式声明 →
+        //      `select_providers_for_explicit_profile`，不读预设、不碰 session_routes；
+        //   2. 既有的按终端路由（推断式）：仅当 PerTerminalRoutingConfig 开启、该应用
+        //      启用了自动故障转移、且 session_id 来自客户端稳定标识时才按会话绑定起点，
+        //      否则 `select_providers_for_session` 内部退化为 `select_providers`，零回归。
+        let providers = match profile_id {
+            Some(pid) => {
+                state
+                    .provider_router
+                    .select_providers_for_explicit_profile(app_type_str, pid)
+                    .await
+            }
+            None => {
+                state
+                    .provider_router
+                    .select_providers_for_session(app_type_str, &session_id, session_client_provided)
+                    .await
+            }
+        }
+        .map_err(|e| match e {
+            crate::error::AppError::AllProvidersCircuitOpen => ProxyError::AllProvidersCircuitOpen,
+            crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
+            _ => ProxyError::DatabaseError(e.to_string()),
+        })?;
 
         let provider = providers
             .first()

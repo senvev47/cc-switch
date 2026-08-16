@@ -3358,6 +3358,99 @@ pub async fn open_provider_terminal(
     Ok(true)
 }
 
+/// 打开绑定到某命名故障转移档案的终端（「档案即端点」）
+///
+/// 与 `open_provider_terminal` 的区别：那是把**某个 provider 的真实上游配置**塞进终端，
+/// 直连上游；本命令把终端指向 `<origin>/p/<profile_id>`——**经本地代理**，由代理按该档案
+/// 的成员序列做 P1→P2→… 故障转移。因此：
+///
+///   - `ANTHROPIC_BASE_URL` 指向档案端点，档案成员改动即时生效（代理每请求实时读 DB）；
+///   - **不把真实密钥写进临时 settings 文件**，统一写 `PROXY_MANAGED` 占位，真实凭据留在
+///     DB 里由代理附加；
+///   - 额外写入 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，让 claude code 向
+///     `{base_url}/v1/models` 拉取该档案的模型列表（其缓存按 baseUrl 分键，不同档案的
+///     终端互不污染）；
+///   - 模型角色键（`ANTHROPIC_DEFAULT_*_MODEL{,_NAME}`）取自档案 P1 provider 的配置，
+///     作为网关发现之外的保底。
+///
+/// 注意：env 只在客户端**进程启动时**读取，所以本命令只影响新开的终端，已运行的终端不受
+/// 影响——这是客户端的固有行为，不是缺陷。
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn open_profile_terminal(
+    state: State<'_, crate::store::AppState>,
+    app: String,
+    #[allow(non_snake_case)] profileId: String,
+    cwd: Option<String>,
+) -> Result<bool, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let launch_cwd = resolve_launch_cwd(cwd)?;
+
+    // 档案归属校验：档案主键是 (id, app_type)，不允许跨应用开终端。
+    if !state
+        .db
+        .failover_profile_exists(&app, &profileId)
+        .map_err(|e| format!("读取档案失败: {e}"))?
+    {
+        return Err(format!("档案 {profileId} 不存在或不属于应用 {app}"));
+    }
+
+    let member_ids = state
+        .db
+        .get_failover_profile_member_ids(&app, Some(&profileId))
+        .map_err(|e| format!("读取档案成员失败: {e}"))?;
+    let p1_id = member_ids
+        .first()
+        .ok_or_else(|| format!("档案 {profileId} 还没有成员，无法确定模型列表"))?;
+
+    let providers = ProviderService::list(state.inner(), app_type.clone())
+        .map_err(|e| format!("获取提供商列表失败: {e}"))?;
+    let p1 = providers
+        .get(p1_id)
+        .ok_or_else(|| format!("档案首位供应商 {p1_id} 不存在"))?;
+
+    let (claude_base, codex_base) = state
+        .proxy_service
+        .profile_base_urls(&profileId)
+        .await
+        .map_err(|e| format!("生成档案端点地址失败: {e}"))?;
+
+    // 以 P1 的配置为底（拿到它的模型角色键），再覆盖成"走代理 + 不带真实密钥"。
+    let mut env_vars = extract_env_vars_from_config(&p1.settings_config, &app_type);
+    let profile_base = match app_type {
+        AppType::Codex => codex_base,
+        _ => claude_base,
+    };
+    let overrides: Vec<(&str, String)> = vec![
+        ("ANTHROPIC_BASE_URL", profile_base.clone()),
+        (
+            "ANTHROPIC_AUTH_TOKEN",
+            crate::services::proxy::PROXY_TOKEN_PLACEHOLDER.to_string(),
+        ),
+        (
+            "ANTHROPIC_API_KEY",
+            crate::services::proxy::PROXY_TOKEN_PLACEHOLDER.to_string(),
+        ),
+        (
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+            "1".to_string(),
+        ),
+    ];
+    for (key, value) in overrides {
+        // 真实密钥不进临时文件：同名键一律替换，不是追加。
+        env_vars.retain(|(existing, _)| existing != key);
+        env_vars.push((key.to_string(), value));
+    }
+
+    log::info!("档案端点终端：app={app} profile={profileId} base={profile_base} P1={}", p1.name);
+
+    // 配置文件名用档案 id，避免与 open_provider_terminal 的 provider 文件互相覆盖。
+    launch_terminal_with_env(env_vars, &format!("profile_{profileId}"), launch_cwd.as_deref())
+        .map_err(|e| format!("启动终端失败: {e}"))?;
+
+    Ok(true)
+}
+
 /// 从提供商配置中提取环境变量
 fn extract_env_vars_from_config(
     config: &serde_json::Value,
@@ -3501,7 +3594,10 @@ fn write_claude_config(
     let config_json =
         serde_json::to_string_pretty(&config_obj).map_err(|e| format!("序列化配置失败: {e}"))?;
 
-    std::fs::write(config_file, config_json).map_err(|e| format!("写入配置文件失败: {e}"))
+    // 用原子写（temp + rename、自动建父目录、Windows 共享冲突退避）：终端可能在
+    // 我们还没写完时就被启动并读取该文件，裸 write 会让它读到截断内容。
+    crate::config::atomic_write(config_file, config_json.as_bytes())
+        .map_err(|e| format!("写入配置文件失败: {e}"))
 }
 
 /// macOS: 根据用户首选终端启动

@@ -2582,7 +2582,8 @@
     "inQueue": "In queue",
     "addQueue": "Add",
     "priority": {
-      "tooltip": "Failover priority {{priority}}"
+      "tooltip": "Failover priority {{priority}}",
+      "profileTooltip": "{{profileName}} · P{{priority}}"
     },
     "tooltip": {
       "enabled": "{{app}} failover enabled\nRequests follow queue priority (P1→P2→...)",

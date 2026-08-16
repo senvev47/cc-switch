@@ -62,6 +62,7 @@ import {
 } from "@/hooks/useHermes";
 import { useStreamCheck } from "@/hooks/useStreamCheck";
 import { ProviderCard } from "@/components/providers/ProviderCard";
+import type { ProviderProfileBadge } from "@/components/providers/ProviderCard";
 import { ProviderEmptyState } from "@/components/providers/ProviderEmptyState";
 import {
   useAutoFailoverEnabled,
@@ -71,7 +72,9 @@ import {
 } from "@/lib/query/failover";
 import {
   useFailoverProfiles,
+  useFailoverProfileMembersMany,
   useAddProviderToFailoverProfile,
+  toNamedFailoverProfiles,
 } from "@/lib/query/failoverProfiles";
 import {
   useCurrentOmoProviderId,
@@ -347,13 +350,48 @@ export function ProviderList({
   const removeFromQueue = useRemoveFromFailoverQueue();
   const { data: failoverProfilesData } = useFailoverProfiles(appId);
   const addProviderToProfile = useAddProviderToFailoverProfile();
-  const namedFailoverProfiles = useMemo(
-    () =>
-      (failoverProfilesData ?? [])
-        .filter((p) => !!p.profileId)
-        .map((p) => ({ profileId: p.profileId!, name: p.name })),
+  /** 命名档案（按 sortIndex 稳定排序，带固定配色索引）。 */
+  const orderedNamedProfiles = useMemo(
+    () => toNamedFailoverProfiles(failoverProfilesData),
     [failoverProfilesData],
   );
+  const namedFailoverProfiles = useMemo(
+    () =>
+      orderedNamedProfiles.map((p) => ({
+        profileId: p.profileId,
+        name: p.name,
+      })),
+    [orderedNamedProfiles],
+  );
+  const namedProfileIds = useMemo(
+    () => orderedNamedProfiles.map((p) => p.profileId),
+    [orderedNamedProfiles],
+  );
+  // 每个命名档案一个成员查询（复用 failoverProfileKeys.members，与档案面板共享缓存）
+  const namedProfileMembers = useFailoverProfileMembersMany(
+    appId,
+    namedProfileIds,
+  );
+  /** providerId → 命名档案徽章（一个供应商可同时属于多个档案，故为数组）。 */
+  const profileBadgesByProviderId = useMemo(() => {
+    const map = new Map<string, ProviderProfileBadge[]>();
+    orderedNamedProfiles.forEach((profile, profileIdx) => {
+      const members = namedProfileMembers[profileIdx];
+      if (!members) return;
+      members.forEach((member, memberIdx) => {
+        const badge: ProviderProfileBadge = {
+          profileId: profile.profileId,
+          profileName: profile.name,
+          priority: memberIdx + 1,
+          colorIndex: profile.colorIndex,
+        };
+        const existing = map.get(member.providerId);
+        if (existing) existing.push(badge);
+        else map.set(member.providerId, [badge]);
+      });
+    });
+    return map;
+  }, [orderedNamedProfiles, namedProfileMembers]);
   const [groupFailoverActionId, setGroupFailoverActionId] = useState<
     string | null
   >(null);
@@ -1701,6 +1739,7 @@ export function ProviderList({
         isProxyTakeover={isProxyTakeover}
         isAutoFailoverEnabled={isFailoverModeActive}
         failoverPriority={getFailoverPriority(provider.id)}
+        profileBadges={profileBadgesByProviderId.get(provider.id)}
         isInFailoverQueue={isInFailoverQueue(provider.id)}
         onToggleFailover={(enabled) =>
           handleToggleFailover(provider.id, enabled)
@@ -2026,6 +2065,7 @@ interface SortableProviderCardProps {
   isProxyTakeover: boolean;
   isAutoFailoverEnabled: boolean;
   failoverPriority?: number;
+  profileBadges?: ProviderProfileBadge[];
   isInFailoverQueue: boolean;
   onToggleFailover: (enabled: boolean) => void;
   namedFailoverProfiles?: { profileId: string; name: string }[];
@@ -2384,6 +2424,7 @@ function SortableProviderCard({
   isProxyTakeover,
   isAutoFailoverEnabled,
   failoverPriority,
+  profileBadges,
   isInFailoverQueue,
   onToggleFailover,
   namedFailoverProfiles,
@@ -2508,6 +2549,7 @@ function SortableProviderCard({
           }}
           isAutoFailoverEnabled={isAutoFailoverEnabled}
           failoverPriority={failoverPriority}
+          profileBadges={profileBadges}
           isInFailoverQueue={isInFailoverQueue}
           onToggleFailover={onToggleFailover}
           namedFailoverProfiles={namedFailoverProfiles}

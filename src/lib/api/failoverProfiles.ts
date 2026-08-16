@@ -84,4 +84,17 @@ export const failoverProfilesApi = {
       orderedProviderIds,
     });
   },
+
+  /** 打开一个绑定到该命名档案的终端。cwd 缺省时由后端决定工作目录。 */
+  async openProfileTerminal(
+    appType: string,
+    profileId: string,
+    cwd?: string,
+  ): Promise<void> {
+    return invoke("open_profile_terminal", {
+      app: appType,
+      profileId,
+      cwd,
+    });
+  },
 };

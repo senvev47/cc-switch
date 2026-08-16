@@ -24,7 +24,7 @@ export function PerTerminalRoutingConfigPanel() {
   const { t } = useTranslation();
   const [config, setConfig] = useState<PerTerminalRoutingConfig>({
     enabled: false,
-    nextNewTerminalProfileId: null,
+    nextNewTerminalProfileIdByApp: null,
   });
   const [isLoading, setIsLoading] = useState(true);
 

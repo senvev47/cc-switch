@@ -800,8 +800,10 @@ pub async fn set_per_terminal_routing_config(
         .set_per_terminal_routing_config(&config)
         .map_err(|e| e.to_string())?;
     log::info!(
-        "按终端路由配置已更新: enabled={}, next_new_terminal_profile_id={:?}",
-        config.enabled, config.next_new_terminal_profile_id
+        "按终端路由配置已更新: enabled={}, next_new_terminal_profile_id_by_app={:?}, next_new_terminal_profile_id(legacy)={:?}",
+        config.enabled,
+        config.next_new_terminal_profile_id_by_app,
+        config.next_new_terminal_profile_id
     );
     // 关闭总开关时立即清空已绑定的会话路由，避免内存残留。
     // 开启/切换策略时无需清理：已绑定会话始终沿用其首次起点，新会话按新策略派发。

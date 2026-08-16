@@ -1573,6 +1573,7 @@ pub fn run() {
             commands::probe_tool_installations,
             // Provider terminal
             commands::open_provider_terminal,
+            commands::open_profile_terminal,
             // Universal Provider management
             commands::get_universal_providers,
             commands::get_universal_provider,

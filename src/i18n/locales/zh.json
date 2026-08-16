@@ -2582,7 +2582,8 @@
     "inQueue": "已加入",
     "addQueue": "加入",
     "priority": {
-      "tooltip": "故障转移优先级 {{priority}}"
+      "tooltip": "故障转移优先级 {{priority}}",
+      "profileTooltip": "{{profileName}} · P{{priority}}"
     },
     "tooltip": {
       "enabled": "{{app}} 故障转移已启用\n按队列优先级（P1→P2→...）选择供应商",

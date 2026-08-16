@@ -2582,7 +2582,8 @@
     "inQueue": "キュー内",
     "addQueue": "追加",
     "priority": {
-      "tooltip": "フェイルオーバー優先度 {{priority}}"
+      "tooltip": "フェイルオーバー優先度 {{priority}}",
+      "profileTooltip": "{{profileName}} · P{{priority}}"
     },
     "tooltip": {
       "enabled": "{{app}} フェイルオーバーが有効\nキューの優先度（P1→P2→...）で使用します",

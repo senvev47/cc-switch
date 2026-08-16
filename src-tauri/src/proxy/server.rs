@@ -288,7 +288,29 @@ impl ProxyServer {
         );
     }
 
+    /// 组装路由表。
+    ///
+    /// 同一套路由挂载两次：
+    ///   1. 裸路径（既有行为，零回归）；
+    ///   2. `/p/:profile_id` 前缀下（「档案即端点」——终端用哪个 base URL 就属于哪个
+    ///      命名故障转移档案，绑定显式、无状态、确定）。
+    ///
+    /// `Router::nest` 会为内层 handler **剥掉已匹配前缀**，因此 Claude 侧透传
+    /// `uri.path()` 的逻辑（`handlers::handle_messages_for_app` 的 `raw_endpoint`）与
+    /// Gemini 侧的逐字路径透传都无需改动，前缀也不会泄漏到上游 URL。
+    ///
+    /// 注意：**不要**为前缀路径加任何重定向。claude code 的网关模型发现用
+    /// `redirect: "error"` 发起 `GET {base_url}/v1/models`，任何 301 都会让发现失败。
     fn build_router(&self) -> Router {
+        Router::new()
+            .merge(Self::api_routes())
+            .nest("/p/:profile_id", Self::api_routes())
+            // 提高默认请求体大小限制（避免 413 Payload Too Large）
+            .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
+            .with_state(self.state.clone())
+    }
+
+    fn api_routes() -> Router<ProxyState> {
         Router::new()
             // 健康检查
             .route("/health", get(handlers::health_check))
@@ -364,9 +386,6 @@ impl ProxyServer {
             .route("/gemini/v1beta/*path", any(handlers::handle_gemini))
             // Gemini 的 GA 版本也叫 /v1，给原 SDK 留一条出口
             .route("/gemini/v1/*path", any(handlers::handle_gemini))
-            // 提高默认请求体大小限制（避免 413 Payload Too Large）
-            .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
-            .with_state(self.state.clone())
     }
 
     /// 在不重启服务的情况下更新运行时配置

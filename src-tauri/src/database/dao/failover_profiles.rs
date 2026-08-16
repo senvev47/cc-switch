@@ -107,6 +107,43 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// 按档案 id 反查其所属 app_type（「档案即端点」用）。
+    ///
+    /// `/p/<profile_id>` 端点在路由层是 app 无关的：同一个前缀既可能承载 claude 的
+    /// `/v1/messages`，也可能承载 codex 的 `/v1/responses`。而档案主键是
+    /// `(id, app_type)`，一个 id 只归属一个 app，因此可由 id 唯一反查。
+    /// 档案不存在时返回 `None`（调用方据此报错，而非静默退化到全局供应商）。
+    pub fn failover_profile_app_type(&self, profile_id: &str) -> Result<Option<String>, AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.query_row(
+            "SELECT app_type FROM failover_profiles WHERE id = ?1 LIMIT 1",
+            [profile_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(AppError::Database(other.to_string())),
+        })
+    }
+
+    /// 该档案是否存在于给定 app 之下（显式档案路由的归属校验）。
+    pub fn failover_profile_exists(
+        &self,
+        app_type: &str,
+        profile_id: &str,
+    ) -> Result<bool, AppError> {
+        let conn = lock_conn!(self.conn);
+        let count: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM failover_profiles WHERE id = ?1 AND app_type = ?2",
+                rusqlite::params![profile_id, app_type],
+                |row| row.get(0),
+            )
+            .map_err(AppError::from)?;
+        Ok(count > 0)
+    }
+
     /// 创建新档案，返回档案 id。
     pub fn create_failover_profile(
         &self,

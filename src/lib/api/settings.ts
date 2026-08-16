@@ -353,10 +353,8 @@ export interface LogConfig {
 /** 按终端路由配置（Feature #2）。字段对应后端 PerTerminalRoutingConfig。 */
 export interface PerTerminalRoutingConfig {
   enabled: boolean;
-  /** 新终端绑定的命名档案 id；null/undefined = 默认共享队列。
-   *  持久保留，每个新开终端都绑定到该档案，直到用户手动更改。
-   *  指向已删除档案时由后端清回 null。 */
-  nextNewTerminalProfileId?: string | null;
+  /** 按 app_type 分键的「新终端使用哪个档案」预设；缺省/无该 app 的键 = 默认共享队列。 */
+  nextNewTerminalProfileIdByApp?: Record<string, string> | null;
 }
 
 export interface BackupEntry {
