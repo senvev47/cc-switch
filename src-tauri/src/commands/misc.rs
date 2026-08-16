@@ -4127,16 +4127,15 @@ fn launch_windows_terminal(
         "@echo off
 {cwd_command}
 echo Using provider-specific claude config:
-echo {}
+echo {config_path_for_batch}
 {claude_line}
 {cleanup_line}
 del \"%~f0\" >nul 2>&1
 ",
-        config_path_for_batch,
+        cwd_command = cwd_command,
+        config_path_for_batch = config_path_for_batch,
         claude_line = claude_line,
         cleanup_line = cleanup_line,
-        config_path_for_batch,
-        cwd_command = cwd_command,
     );
 
     std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
