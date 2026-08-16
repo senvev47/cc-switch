@@ -1288,12 +1288,7 @@ function App() {
                     settingsData?.enableFailoverToggle && (
                       <FailoverToggle activeApp={activeApp} />
                     )}
-                  {activeApp !== "claude-desktop" &&
-                    activeApp !== "opencode" &&
-                    activeApp !== "openclaw" &&
-                    activeApp !== "hermes" && (
-                      <TerminalRoutingToggle activeApp={activeApp} />
-                    )}
+                  <TerminalRoutingToggle activeApp={activeApp} />
                 </div>
               )}
             {currentView === "providers" &&
