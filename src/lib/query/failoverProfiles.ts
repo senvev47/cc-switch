@@ -23,6 +23,8 @@ export interface NamedFailoverProfile {
   profileId: string;
   name: string;
   memberCount: number;
+  /** 「档案即端口」：该档案独占的代理端口。 */
+  port?: number;
   /** 稳定配色索引 = 按 sortIndex（并列时按 profileId）排序后的位次。 */
   colorIndex: number;
 }
@@ -50,6 +52,7 @@ export function toNamedFailoverProfiles(
       profileId: p.profileId!,
       name: p.name,
       memberCount: p.memberCount,
+      port: p.port,
       colorIndex: idx,
     }));
 }
