@@ -432,9 +432,9 @@
         }
       },
       "perTerminalRouting": {
-        "title": "按终端路由",
+        "title": "终端路由",
         "description": "让不同的 Codex 终端使用不同的故障转移链起点",
-        "enabled": "启用按终端路由",
+        "enabled": "启用终端路由",
         "enabledDescription": "开启后，每个终端（按 session_id 区分）会绑定各自的故障转移链起点。需要该应用已启用自动故障转移，否则此功能不生效。",
         "newTerminalPolicy": "新终端策略",
         "newTerminalPolicyDescription": "新启动的终端如何选择故障转移链起点",

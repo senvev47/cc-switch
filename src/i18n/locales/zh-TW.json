@@ -432,9 +432,9 @@
         }
       },
       "perTerminalRouting": {
-        "title": "按終端路由",
+        "title": "終端路由",
         "description": "讓不同的 Codex 終端使用不同的故障轉移鏈起點",
-        "enabled": "啟用按終端路由",
+        "enabled": "啟用終端路由",
         "enabledDescription": "開啟後，每個終端（按 session_id 區分）會綁定各自的故障轉移鏈起點。需要該應用已啟用自動故障轉移，否則此功能不生效。",
         "newTerminalPolicy": "新終端策略",
         "newTerminalPolicyDescription": "新啟動的終端如何選擇故障轉移鏈起點",
