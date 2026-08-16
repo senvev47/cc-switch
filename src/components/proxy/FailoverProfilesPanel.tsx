@@ -462,6 +462,17 @@ export function FailoverProfilesPanel({
                           {p.memberCount}{" "}
                           {t("proxy.failoverProfiles.membersUnit", "家")}
                         </span>
+                        {p.port != null && (
+                          <span
+                            className="px-1.5 py-0.5 text-[10px] rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 font-mono"
+                            title={t(
+                              "proxy.failoverProfiles.portTitle",
+                              "该档案独占的代理端口",
+                            )}
+                          >
+                            :{p.port}
+                          </span>
+                        )}
                       </div>
                     )}
                   </button>

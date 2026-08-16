@@ -76,14 +76,12 @@ impl RequestContext {
     /// 创建请求上下文
     ///
     /// # Arguments
-    /// * `state` - 代理服务器状态
+    /// * `state` - 代理服务器状态（含 `profile_binding`：本端口绑定的命名档案）
     /// * `body` - 请求体 JSON
     /// * `headers` - 请求头（用于提取 Session ID）
     /// * `app_type` - 应用类型
     /// * `tag` - 日志标签
     /// * `app_type_str` - 应用类型字符串
-    /// * `profile_id` - 「档案即端点」：请求 URL 里 `/p/<profile_id>` 显式声明的命名
-    ///   故障转移档案。`None` 表示走裸路径（既有行为）。
     ///
     /// # Errors
     /// 返回 `ProxyError` 如果 Provider 选择失败
@@ -94,7 +92,6 @@ impl RequestContext {
         app_type: AppType,
         tag: &'static str,
         app_type_str: &'static str,
-        profile_id: Option<&str>,
     ) -> Result<Self, ProxyError> {
         let start_time = Instant::now();
 
@@ -133,15 +130,23 @@ impl RequestContext {
             session_result.client_provided
         );
 
-        // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
+        // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求/跨端口保持）
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
         //
         // 两条路：
-        //   1. 「档案即端点」：请求走 `/p/<profile_id>/...`，档案由 URL 显式声明 →
+        //   1. 「档案即端口」：本 server 绑定了命名档案（端口本身携带档案身份）→
         //      `select_providers_for_explicit_profile`，不读预设、不碰 session_routes；
         //   2. 既有的按终端路由（推断式）：仅当 PerTerminalRoutingConfig 开启、该应用
         //      启用了自动故障转移、且 session_id 来自客户端稳定标识时才按会话绑定起点，
         //      否则 `select_providers_for_session` 内部退化为 `select_providers`，零回归。
+        let profile_id: Option<&str> = state
+            .profile_binding
+            .as_ref()
+            .map(|(app, pid)| pid.as_str());
+        // 绑定档案的 app_type 必须与请求的 app_type 一致——否则视为无绑定（防御性，
+        // 实际上端口按 (app_type, profile_id) 分配，不会跨 app）。
+        let profile_id = profile_id
+            .filter(|_| state.profile_binding.as_ref().unwrap().0 == app_type_str);
         let providers = match profile_id {
             Some(pid) => {
                 state

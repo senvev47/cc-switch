@@ -27,6 +27,9 @@ pub struct FailoverProfile {
     pub name: String,
     pub sort_index: Option<usize>,
     pub member_count: usize,
+    /// 「档案即端口」：该档案独占的代理端口（虚拟默认档案为 `None` = 主端口）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 /// 档案成员（有序）
@@ -62,6 +65,7 @@ impl Database {
             name: "默认档案".to_string(),
             sort_index: Some(0),
             member_count: default_count,
+            port: None,
         }];
 
         let mut stmt = conn
@@ -69,7 +73,10 @@ impl Database {
                 "SELECT id, name, sort_index,
                         (SELECT COUNT(*) FROM failover_profile_members m
                          WHERE m.profile_id = failover_profiles.id
-                           AND m.app_type = failover_profiles.app_type) AS member_count
+                           AND m.app_type = failover_profiles.app_type) AS member_count,
+                        (SELECT port FROM failover_profile_ports pp
+                         WHERE pp.profile_id = failover_profiles.id
+                           AND pp.app_type = failover_profiles.app_type) AS port
                  FROM failover_profiles
                  WHERE app_type = ?1
                  ORDER BY COALESCE(sort_index, 999999), id ASC",
@@ -84,6 +91,7 @@ impl Database {
                     name: row.get(1)?,
                     sort_index: row.get(2)?,
                     member_count: row.get(3)?,
+                    port: row.get::<_, Option<i64>>(4)?.map(|p| p as u16),
                 })
             })
             .map_err(|e| AppError::Database(e.to_string()))?
@@ -144,6 +152,114 @@ impl Database {
         Ok(count > 0)
     }
 
+    // ----- 「档案即端口」：档案 ↔ 端口映射 -----
+
+    /// 取某档案占用的端口；无映射则 `None`（此时该档案走主端口 15721）。
+    pub fn get_profile_port(
+        &self,
+        app_type: &str,
+        profile_id: &str,
+    ) -> Result<Option<u16>, AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.query_row(
+            "SELECT port FROM failover_profile_ports WHERE app_type = ?1 AND profile_id = ?2",
+            rusqlite::params![app_type, profile_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|p| Some(p as u16))
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(AppError::Database(other.to_string())),
+        })
+    }
+
+    /// 写入档案端口映射。`UNIQUE(port)` 约束在 DB 层兜底端口冲突——
+    /// 调用方应先 `find_profile_by_port` 确认端口未被占用。
+    pub fn set_profile_port(
+        &self,
+        app_type: &str,
+        profile_id: &str,
+        port: u16,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "INSERT INTO failover_profile_ports (app_type, profile_id, port)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(app_type, profile_id) DO UPDATE SET port = excluded.port",
+            rusqlite::params![app_type, profile_id, port as i64],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 按端口反查档案（端口 server 请求路径不携带档案 id，由端口本身唯一标识档案）。
+    pub fn find_profile_by_port(
+        &self,
+        port: u16,
+    ) -> Result<Option<(String, String)>, AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.query_row(
+            "SELECT app_type, profile_id FROM failover_profile_ports WHERE port = ?1",
+            [port as i64],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(AppError::Database(other.to_string())),
+        })
+    }
+
+    /// 端口是否已被任意档案占用（端口分配前的冲突检测）。
+    pub fn is_port_taken(&self, port: u16) -> Result<bool, AppError> {
+        let conn = lock_conn!(self.conn);
+        let count: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM failover_profile_ports WHERE port = ?1",
+                [port as i64],
+                |row| row.get(0),
+            )
+            .map_err(AppError::from)?;
+        Ok(count > 0)
+    }
+
+    /// 全部档案端口映射（app 启动时恢复端口 server 用）。
+    pub fn all_profile_ports(&self) -> Result<Vec<(String, String, u16)>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn
+            .prepare(
+                "SELECT app_type, profile_id, port FROM failover_profile_ports ORDER BY port ASC",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u16,
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(rows)
+    }
+
+    /// 清除某档案的端口映射（档案删除时调用，释放端口）。
+    pub fn clear_profile_port(
+        &self,
+        app_type: &str,
+        profile_id: &str,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "DELETE FROM failover_profile_ports WHERE app_type = ?1 AND profile_id = ?2",
+            rusqlite::params![app_type, profile_id],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     /// 创建新档案，返回档案 id。
     pub fn create_failover_profile(
         &self,
@@ -194,6 +310,12 @@ impl Database {
         let conn = lock_conn!(self.conn);
         conn.execute(
             "DELETE FROM failover_profile_members WHERE profile_id = ?1 AND app_type = ?2",
+            rusqlite::params![profile_id, app_type],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        // 「档案即端口」：释放该档案占用的端口映射，端口可被后续档案复用。
+        conn.execute(
+            "DELETE FROM failover_profile_ports WHERE profile_id = ?1 AND app_type = ?2",
             rusqlite::params![profile_id, app_type],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;

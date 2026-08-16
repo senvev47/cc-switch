@@ -6,6 +6,8 @@ use crate::app_config::AppType;
 use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::provider::Provider;
+use crate::proxy::failover_switch::FailoverSwitchManager;
+use crate::proxy::provider_router::ProviderRouter;
 use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
@@ -13,6 +15,7 @@ use crate::services::provider::{
     build_effective_settings_with_common_config, write_live_with_common_config,
 };
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use tauri::Emitter;
@@ -61,6 +64,13 @@ pub struct ProxyService {
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
     switch_locks: SwitchLockManager,
+    /// 共享的 ProviderRouter（持有熔断器状态，跨主端口与各档案端口保持一致）。
+    /// 由本服务持有并注入给每个 ProxyServer，保证不同端口的健康统计不分裂。
+    provider_router: Arc<ProviderRouter>,
+    /// 共享的故障转移切换管理器（跨端口统一）。
+    failover_manager: Arc<FailoverSwitchManager>,
+    /// 「档案即端口」：档案端口 server 池，key = `(app_type, profile_id)`。
+    profile_servers: Arc<RwLock<HashMap<(String, String), ProxyServer>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -70,11 +80,16 @@ pub struct HotSwitchOutcome {
 
 impl ProxyService {
     pub fn new(db: Arc<Database>) -> Self {
+        let provider_router = Arc::new(ProviderRouter::new(db.clone()));
+        let failover_manager = Arc::new(FailoverSwitchManager::new(db.clone()));
         Self {
             db,
             server: Arc::new(RwLock::new(None)),
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
+            provider_router,
+            failover_manager,
+            profile_servers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -561,7 +576,14 @@ impl ProxyService {
 
         // 4. 创建并启动服务器
         let app_handle = self.app_handle.read().await.clone();
-        let server = ProxyServer::new(config.clone(), self.db.clone(), app_handle);
+        let server = ProxyServer::new(
+            config.clone(),
+            self.db.clone(),
+            app_handle,
+            self.provider_router.clone(),
+            self.failover_manager.clone(),
+            None,
+        );
         let info = server
             .start()
             .await
@@ -576,6 +598,10 @@ impl ProxyService {
 
         // 5. 保存服务器实例
         *self.server.write().await = Some(server);
+
+        // 6. 恢复档案端口 server（「档案即端口」：app 启动时拉起既有端口映射）
+        //    best-effort，单个失败不影响主端口。
+        self.restore_profile_servers().await;
 
         log::info!("代理服务器已启动: {}:{}", info.address, info.port);
         Ok(info)
@@ -1269,6 +1295,17 @@ impl ProxyService {
 
     /// 停止代理服务器
     pub async fn stop(&self) -> Result<(), String> {
+        // 先停各档案端口 server（独立端口，不阻塞主 server 停止）
+        let mut profile_servers = self.profile_servers.write().await;
+        for ((app_type, profile_id), server) in profile_servers.drain() {
+            if let Err(e) = server.stop().await {
+                log::warn!(
+                    "停止档案端口 server 失败（app={app_type}, profile={profile_id}）: {e}"
+                );
+            }
+        }
+        drop(profile_servers);
+
         if let Some(server) = self.server.write().await.take() {
             server
                 .stop()
@@ -1512,21 +1549,170 @@ impl ProxyService {
         Ok((proxy_url, proxy_codex_base_url))
     }
 
-    /// 「档案即端点」：某命名故障转移档案对应的客户端 base URL。
+    /// 「档案即端口」：某命名故障转移档案对应的客户端 base URL。
     ///
-    /// 返回 `(claude_base, codex_base)`：
-    ///   - claude 系（Anthropic 协议）直接用 `<origin>/p/<profile_id>`，客户端 SDK 会在
-    ///     其后拼 `/v1/messages`（base URL 的路径部分是字符串拼接，会被保留）；
-    ///   - codex 系沿用其惯例，多带一层 `/v1`。
+    /// 每个命名档案独占一个本地代理端口，不同档案 = 不同 baseUrl。
+    /// 调用方（`open_profile_terminal`）会先确保该档案的端口 server 已启动。
+    /// 返回 `http://127.0.0.1:<档案端口>`。
+    pub async fn profile_base_url(
+        &self,
+        app_type: &str,
+        profile_id: &str,
+    ) -> Result<String, String> {
+        let port = self.start_profile_server(app_type, profile_id).await?;
+        Ok(format!("http://127.0.0.1:{port}"))
+    }
+
+    /// 「档案即端口」：为指定档案启动独立端口 server，返回该档案绑定的端口。
     ///
-    /// 终端用哪个 base URL 就属于哪个档案——绑定显式、无状态、确定，不依赖会话标识。
-    pub async fn profile_base_urls(&self, profile_id: &str) -> Result<(String, String), String> {
-        let (proxy_url, _) = self.build_proxy_urls().await?;
-        let origin = proxy_url.trim_end_matches('/');
-        Ok((
-            format!("{origin}/p/{profile_id}"),
-            format!("{origin}/p/{profile_id}/v1"),
-        ))
+    /// 端口分配规则：
+    /// - 已有映射 → 复用（保证 baseUrl 跨重启稳定，避免 claude code 缓存键漂移）；
+    /// - 否则从 15722 起向上找第一个未被占用（既查 DB `UNIQUE(port)`，也 `TcpListener::bind`
+    ///   探测系统占用）的端口，落库后启动。
+    ///
+    /// 失败时回滚已写入的端口映射，避免残留占用记录。
+    pub async fn start_profile_server(
+        &self,
+        app_type: &str,
+        profile_id: &str,
+    ) -> Result<u16, String> {
+        // 已在运行：直接返回绑定端口
+        if let Some(server) = self.profile_servers.read().await.get(&(app_type.to_string(), profile_id.to_string())) {
+            if let Some(port) = server.bound_port().await {
+                return Ok(port);
+            }
+        }
+
+        // 端口分配（复用已有映射或分配新端口）
+        let port = match self.db.get_profile_port(app_type, profile_id) {
+            Ok(Some(p)) => p,
+            Ok(None) => self.allocate_profile_port().await?,
+            Err(e) => return Err(format!("读取档案端口映射失败: {e}")),
+        };
+
+        // 校验档案归属（防御性：端口映射可能因外部改库指向不存在的档案）
+        match self.db.failover_profile_exists(app_type, profile_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(format!("档案不存在: {app_type}/{profile_id}"));
+            }
+            Err(e) => return Err(format!("校验档案存在失败: {e}")),
+        }
+
+        let base_config = self
+            .db
+            .get_proxy_config()
+            .await
+            .map_err(|e| format!("读取代理配置失败: {e}"))?;
+        let mut config = base_config;
+        config.listen_port = port;
+        let app_handle = self.app_handle.read().await.clone();
+
+        let server = ProxyServer::new(
+            config,
+            self.db.clone(),
+            app_handle,
+            self.provider_router.clone(),
+            self.failover_manager.clone(),
+            Some((app_type.to_string(), profile_id.to_string())),
+        );
+
+        match server.start().await {
+            Ok(info) => {
+                self.profile_servers.write().await.insert(
+                    (app_type.to_string(), profile_id.to_string()),
+                    server,
+                );
+                log::info!(
+                    "档案端口 server 已启动: {app_type}/{profile_id} → 127.0.0.1:{}",
+                    info.port
+                );
+                Ok(info.port)
+            }
+            Err(e) => {
+                let msg = format!("启动档案端口 server 失败: {e}");
+                // 端口映射是本次新分配的？若是，回滚以释放供下次重试。
+                if self.db.get_profile_port(app_type, profile_id).ok() == Some(port) {
+                    let _ = self.db.clear_profile_port(app_type, profile_id);
+                }
+                Err(msg)
+            }
+        }
+    }
+
+    /// 分配一个未占用的档案端口（15722 起递增）。
+    async fn allocate_profile_port(&self) -> Result<u16, String> {
+        const START: u16 = 15722;
+        const END: u16 = 16000;
+        for candidate in START..=END {
+            // DB 层占用检测（`failover_profile_ports.UNIQUE(port)`）
+            match self.db.is_port_taken(candidate) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => return Err(format!("查询端口占用失败: {e}")),
+            }
+            // 系统层占用检测（避免与主端口或其它进程冲突）
+            let addr = format!("127.0.0.1:{candidate}");
+            match tokio::net::TcpListener::bind(&addr).await {
+                Ok(_) => {
+                    // 释放探测，留待 ProxyServer 真正 bind
+                    drop(addr);
+                    return Ok(candidate);
+                }
+                Err(_) => continue,
+            }
+        }
+        Err("无可用档案端口（15722-16000 均被占用）".to_string())
+    }
+
+    /// 停止指定档案的端口 server（不删除端口映射，便于下次复用同一端口）。
+    pub async fn stop_profile_server(&self, app_type: &str, profile_id: &str) -> Result<(), String> {
+        if let Some(server) = self
+            .profile_servers
+            .write()
+            .await
+            .remove(&(app_type.to_string(), profile_id.to_string()))
+        {
+            server.stop().await.map_err(|e| format!("停止档案端口 server 失败: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// 重启所有档案端口 server（档案成员/配置变更后调用，复用既有端口保持 baseUrl 稳定）。
+    pub async fn restart_all_profile_servers(&self) {
+        let bindings: Vec<(String, String)> = {
+            let guard = self.profile_servers.read().await;
+            guard.keys().cloned().collect()
+        };
+        for (app_type, profile_id) in bindings {
+            if let Err(e) = self.stop_profile_server(&app_type, &profile_id).await {
+                log::warn!("重启时停止档案端口失败（{app_type}/{profile_id}）: {e}");
+            }
+            if let Err(e) = self.start_profile_server(&app_type, &profile_id).await {
+                log::warn!("重启时启动档案端口失败（{app_type}/{profile_id}）: {e}");
+            }
+        }
+    }
+
+    /// 启动恢复：app 启动时拉起所有已落库的档案端口 server。
+    ///
+    /// 仅尝试启动、逐个 best-effort；单个失败不影响其余端口与主端口。
+    pub async fn restore_profile_servers(&self) {
+        let ports = match self.db.all_profile_ports() {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("读取档案端口映射失败，跳过恢复: {e}");
+                return;
+            }
+        };
+        if ports.is_empty() {
+            return;
+        }
+        for (app_type, profile_id, _port) in ports {
+            if let Err(e) = self.start_profile_server(&app_type, &profile_id).await {
+                log::warn!("恢复档案端口 server 失败（{app_type}/{profile_id}）: {e}");
+            }
+        }
     }
 
     /// Grok Build live 是否具备可接管的自定义模型表。
@@ -3192,7 +3378,14 @@ impl ProxyService {
             }
 
             let app_handle = self.app_handle.read().await.clone();
-            let new_server = ProxyServer::new(new_config.clone(), self.db.clone(), app_handle);
+            let new_server = ProxyServer::new(
+                new_config.clone(),
+                self.db.clone(),
+                app_handle,
+                self.provider_router.clone(),
+                self.failover_manager.clone(),
+                None,
+            );
             let info = new_server
                 .start()
                 .await

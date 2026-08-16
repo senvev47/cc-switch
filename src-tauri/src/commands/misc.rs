@@ -3358,18 +3358,18 @@ pub async fn open_provider_terminal(
     Ok(true)
 }
 
-/// 打开绑定到某命名故障转移档案的终端（「档案即端点」）
+/// 打开绑定到某命名故障转移档案的终端（「档案即端口」）
 ///
 /// 与 `open_provider_terminal` 的区别：那是把**某个 provider 的真实上游配置**塞进终端，
-/// 直连上游；本命令把终端指向 `<origin>/p/<profile_id>`——**经本地代理**，由代理按该档案
-/// 的成员序列做 P1→P2→… 故障转移。因此：
+/// 直连上游；本命令把终端指向该档案独占的代理端口 `http://127.0.0.1:<档案端口>`——
+/// **经本地代理**，由代理按该档案的成员序列做 P1→P2→… 故障转移。因此：
 ///
-///   - `ANTHROPIC_BASE_URL` 指向档案端点，档案成员改动即时生效（代理每请求实时读 DB）；
+///   - `ANTHROPIC_BASE_URL` 指向档案端口，档案成员改动即时生效（代理每请求实时读 DB）；
 ///   - **不把真实密钥写进临时 settings 文件**，统一写 `PROXY_MANAGED` 占位，真实凭据留在
 ///     DB 里由代理附加；
 ///   - 额外写入 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，让 claude code 向
-///     `{base_url}/v1/models` 拉取该档案的模型列表（其缓存按 baseUrl 分键，不同档案的
-///     终端互不污染）；
+///     `{base_url}/v1/models` 拉取该档案的模型列表。各档案端口 baseUrl 不同，
+///     claude code 的 gateway discovery 缓存按 baseUrl 天然隔离，不同档案终端互不污染；
 ///   - 模型角色键（`ANTHROPIC_DEFAULT_*_MODEL{,_NAME}`）取自档案 P1 provider 的配置，
 ///     作为网关发现之外的保底。
 ///
@@ -3409,18 +3409,15 @@ pub async fn open_profile_terminal(
         .get(p1_id)
         .ok_or_else(|| format!("档案首位供应商 {p1_id} 不存在"))?;
 
-    let (claude_base, codex_base) = state
+    // 启动该档案的专属端口 server（已运行则复用），拿到 baseUrl。
+    let profile_base = state
         .proxy_service
-        .profile_base_urls(&profileId)
+        .profile_base_url(&app, &profileId)
         .await
-        .map_err(|e| format!("生成档案端点地址失败: {e}"))?;
+        .map_err(|e| format!("生成档案端口地址失败: {e}"))?;
 
     // 以 P1 的配置为底（拿到它的模型角色键），再覆盖成"走代理 + 不带真实密钥"。
     let mut env_vars = extract_env_vars_from_config(&p1.settings_config, &app_type);
-    let profile_base = match app_type {
-        AppType::Codex => codex_base,
-        _ => claude_base,
-    };
     let overrides: Vec<(&str, String)> = vec![
         ("ANTHROPIC_BASE_URL", profile_base.clone()),
         (
@@ -3442,7 +3439,7 @@ pub async fn open_profile_terminal(
         env_vars.push((key.to_string(), value));
     }
 
-    log::info!("档案端点终端：app={app} profile={profileId} base={profile_base} P1={}", p1.name);
+    log::info!("档案端口终端：app={app} profile={profileId} base={profile_base} P1={}", p1.name);
 
     // 配置文件名用档案 id，避免与 open_provider_terminal 的 provider 文件互相覆盖。
     launch_terminal_with_env(env_vars, &format!("profile_{profileId}"), launch_cwd.as_deref())

@@ -38,7 +38,7 @@ pub struct ProxyState {
     pub start_time: Arc<RwLock<Option<std::time::Instant>>>,
     /// 每个应用类型当前使用的 provider (app_type -> (provider_id, provider_name))
     pub current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
-    /// 共享的 ProviderRouter（持有熔断器状态，跨请求保持）
+    /// 共享的 ProviderRouter（持有熔断器状态，跨所有请求/所有端口保持）
     pub provider_router: Arc<ProviderRouter>,
     /// Gemini Native shadow state，用于 thoughtSignature / tool call 回放
     pub gemini_shadow: Arc<GeminiShadowStore>,
@@ -48,6 +48,14 @@ pub struct ProxyState {
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
+    /// 「档案即端口」：本 server 绑定的命名档案 `(app_type, profile_id)`。
+    ///
+    /// - `None`：主端口 server，走既有路由（`select_providers_for_session` / `select_providers`）。
+    /// - `Some`：档案端口 server，该端口的所有请求固定走 `select_providers_for_explicit_profile`。
+    ///
+    /// 绑定由端口本身唯一确定（见 `failover_profile_ports` 表），请求路径不再携带档案 id，
+    /// 故 handler 不需要从 URL 取 profile_id。
+    pub profile_binding: Arc<Option<(String, String)>>,
 }
 
 /// 代理HTTP服务器
@@ -57,19 +65,24 @@ pub struct ProxyServer {
     shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
     /// 服务器任务句柄，用于等待服务器实际关闭
     server_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// 实际绑定的端口（`start()` 后填充，前端开终端要用）。
+    bound_port: Arc<RwLock<Option<u16>>>,
 }
 
 impl ProxyServer {
+    /// 创建代理服务器。
+    ///
+    /// `provider_router` 与 `failover_manager` 由调用方（`ProxyService`）持有并注入，
+    /// 保证主端口与各档案端口 server **共享同一份熔断器/故障转移状态**——
+    /// 否则不同端口的健康统计会分裂，违背既有不变量。
     pub fn new(
         config: ProxyConfig,
         db: Arc<Database>,
         app_handle: Option<tauri::AppHandle>,
+        provider_router: Arc<ProviderRouter>,
+        failover_manager: Arc<FailoverSwitchManager>,
+        profile_binding: Option<(String, String)>,
     ) -> Self {
-        // 创建共享的 ProviderRouter（熔断器状态将跨所有请求保持）
-        let provider_router = Arc::new(ProviderRouter::new(db.clone()));
-        // 创建故障转移切换管理器
-        let failover_manager = Arc::new(FailoverSwitchManager::new(db.clone()));
-
         let state = ProxyState {
             db,
             config: Arc::new(RwLock::new(config.clone())),
@@ -81,6 +94,7 @@ impl ProxyServer {
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             app_handle,
             failover_manager,
+            profile_binding: Arc::new(profile_binding),
         };
 
         Self {
@@ -88,7 +102,13 @@ impl ProxyServer {
             state,
             shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),
+            bound_port: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// 返回 server 实际绑定的端口（`start()` 后可用）。
+    pub async fn bound_port(&self) -> Option<u16> {
+        *self.bound_port.read().await
     }
 
     pub async fn start(&self) -> Result<ProxyServerInfo, ProxyError> {
@@ -117,7 +137,16 @@ impl ProxyServer {
             .map_err(|e| ProxyError::BindFailed(e.to_string()))?;
         let actual_port = local_addr.port();
 
-        log::info!("[{}] 代理服务器启动于 {local_addr}", log_srv::STARTED);
+        log::info!(
+            "[{}] 代理服务器启动于 {local_addr}（绑定档案: {}）",
+            log_srv::STARTED,
+            match self.state.profile_binding.as_ref() {
+                Some((app, pid)) => format!("{app}/{pid}"),
+                None => "主端口（共享队列/既有路由）".to_string(),
+            }
+        );
+
+        *self.bound_port.write().await = Some(actual_port);
 
         // 更新全局代理端口，用于系统代理检测
         crate::proxy::http_client::set_proxy_port(actual_port);
@@ -290,21 +319,14 @@ impl ProxyServer {
 
     /// 组装路由表。
     ///
-    /// 同一套路由挂载两次：
-    ///   1. 裸路径（既有行为，零回归）；
-    ///   2. `/p/:profile_id` 前缀下（「档案即端点」——终端用哪个 base URL 就属于哪个
-    ///      命名故障转移档案，绑定显式、无状态、确定）。
-    ///
-    /// `Router::nest` 会为内层 handler **剥掉已匹配前缀**，因此 Claude 侧透传
-    /// `uri.path()` 的逻辑（`handlers::handle_messages_for_app` 的 `raw_endpoint`）与
-    /// Gemini 侧的逐字路径透传都无需改动，前缀也不会泄漏到上游 URL。
+    /// 单挂载（裸路径）。档案身份由**端口本身**携带（「档案即端口」）：每个命名档案独占一个
+    /// 代理端口，`ProxyState::profile_binding` 记录该端口绑定的档案，handler 据此选 provider。
+    /// 不再需要 `/p/:profile_id` 路径前缀，也就没有 `Option<Path<HashMap>>` 双挂载的坑。
     ///
     /// 注意：**不要**为前缀路径加任何重定向。claude code 的网关模型发现用
     /// `redirect: "error"` 发起 `GET {base_url}/v1/models`，任何 301 都会让发现失败。
     fn build_router(&self) -> Router {
-        Router::new()
-            .merge(Self::api_routes())
-            .nest("/p/:profile_id", Self::api_routes())
+        Self::api_routes()
             // 提高默认请求体大小限制（避免 413 Payload Too Large）
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
             .with_state(self.state.clone())

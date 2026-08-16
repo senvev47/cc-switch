@@ -436,6 +436,21 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 「档案即端口」：每个命名档案独占一个本地代理端口，不同端口 = 不同 baseUrl
+        // → claude code 的 gateway model discovery 缓存按 baseUrl 天然隔离。
+        // `UNIQUE(port)` 让端口冲突在 DB 层兜底。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS failover_profile_ports (
+                app_type TEXT NOT NULL,
+                profile_id TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                PRIMARY KEY (app_type, profile_id),
+                UNIQUE (port)
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         Ok(())
     }
 

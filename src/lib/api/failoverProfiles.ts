@@ -6,6 +6,8 @@ export interface FailoverProfile {
   name: string;
   sortIndex?: number;
   memberCount: number;
+  /** 「档案即端口」：该档案独占的代理端口（虚拟默认档案为 undefined = 主端口）。 */
+  port?: number;
 }
 
 export interface FailoverProfileMember {

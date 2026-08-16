@@ -45,7 +45,7 @@ use super::{
 use crate::app_config::AppType;
 use crate::database::PRICING_SOURCE_REQUEST;
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -55,45 +55,12 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
 // ============================================================================
-// 档案端点（「档案即端点」）
+// 档案端口（「档案即端口」）
 // ============================================================================
 
-/// `/p/:profile_id` 前缀捕获到的路径参数。
-///
-/// **必须是 `Option<Path<HashMap<..>>>`，不能是 `Path<String>`**：同一套 handler 同时
-/// 挂在裸路径与 `/p/:profile_id` 之下（见 `server::ProxyServer::build_router`），裸路径
-/// 下没有 `profile_id` 捕获，`Path<String>` 会直接拒绝请求。用 `HashMap` 而非具名结构
-/// 还能避免与 Gemini 路由的 `*path` 捕获抢位（该路由在前缀下同时有两个捕获）。
-///
-/// 提取器顺序：本类型实现 `FromRequestParts`，必须放在 `axum::extract::Request`
-/// （`FromRequest`）**之前**。
-pub type ProfileParams = Option<axum::extract::Path<std::collections::HashMap<String, String>>>;
-
-/// 从路径捕获中取出档案 id；裸路径挂载下返回 `None`。
-fn profile_id_of(params: &ProfileParams) -> Option<String> {
-    params
-        .as_ref()
-        .and_then(|Path(map)| map.get("profile_id"))
-        .filter(|id| !id.is_empty())
-        .cloned()
-}
-
-/// 防御性剥离 `/p/<profile_id>` 前缀。
-///
-/// `Router::nest` 正常已为内层 handler 剥掉前缀，本函数是双保险：Claude 与 Gemini
-/// 两条链路会把入站路径原样拼到上游 URL 上，前缀一旦泄漏就会打到上游的错误路径。
-/// 只在确实带该前缀且其后是路径/查询边界时才剥离，避免误伤形如 `/p/xyz-something`
-/// 的正常路径。
-fn strip_profile_prefix<'a>(endpoint: &'a str, profile_id: Option<&str>) -> &'a str {
-    let Some(pid) = profile_id else {
-        return endpoint;
-    };
-    endpoint
-        .strip_prefix("/p/")
-        .and_then(|rest| rest.strip_prefix(pid))
-        .filter(|rest| rest.is_empty() || rest.starts_with('/') || rest.starts_with('?'))
-        .unwrap_or(endpoint)
-}
+// 档案身份由端口本身携带（见 `ProxyState::profile_binding`），请求路径不再含档案 id，
+// 故这里不再需要 `ProfileParams` / `profile_id_of` / `strip_profile_prefix` 那套
+// `/p/:profile_id` 前缀方案的辅助函数。
 
 // ============================================================================
 // 健康检查和状态查询（简单端点）
@@ -116,18 +83,14 @@ pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxySta
     Ok(Json(status))
 }
 
-/// GET /v1/models — Codex model list (reachability check)，以及
-/// GET /p/&lt;profile_id&gt;/v1/models — 按命名档案下发模型列表。
+/// GET /v1/models —— 按本端口的档案绑定下发模型列表。
 ///
-/// **裸路径行为完全不变**：Codex CLI 在启动时探测该端点并按顶层 `models` 字段解析，
-/// 因此直接回传 cc-switch 管理的模型目录文件，且仅在 live config.toml 仍指向
-/// cc-switch 拥有的 `model_catalog_json` 时才服务（与 Codex live 设置导入同一套
-/// 路径归属规则）。
-///
-/// **带 `/p/<profile_id>` 前缀时**改为按该档案的 P1 provider 下发列表。claude code 在
-/// 设置 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 后会向 `{base_url}/v1/models`
-/// 拉取模型并并入 `/model` 选择器（标注 "From gateway"），其缓存按 baseUrl 分键，
-/// 所以不同档案的终端天然互不污染。
+/// - **主端口**（`profile_binding = None`）：Codex CLI 启动探活的静态目录（顶层 `models`
+///   字段，零回归，行为与 `/p/` 前缀方案之前完全一致）；
+/// - **档案端口**（`profile_binding = Some`）：按该档案 P1 provider 的 env 角色键构造
+///   Anthropic `/v1/models` 形状的列表。claude code 在
+///   `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 时向 `{base_url}/v1/models` 拉取，
+///   并并入 `/model` 选择器（标注 "From gateway"）。
 ///
 /// 注意 claude code 侧的三条硬约束：
 ///   1. 它只保留 id 匹配 `/(claude|anthropic)/i` 的条目，其余**会被丢弃**——所以
@@ -135,14 +98,21 @@ pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxySta
 ///      `ANTHROPIC_DEFAULT_*_MODEL` / `*_MODEL_NAME` 的分工一致）；
 ///   2. 探测超时 3 秒；
 ///   3. `redirect: "error"`——本端点**不得**重定向。
-pub async fn handle_models(
-    State(state): State<ProxyState>,
-    params: ProfileParams,
-) -> Result<Json<Value>, ProxyError> {
-    if let Some(profile_id) = profile_id_of(&params) {
+pub async fn handle_models(State(state): State<ProxyState>) -> Result<Json<Value>, ProxyError> {
+    if let Some(profile_id) = bound_profile_id(&state) {
         return handle_profile_models(&state, &profile_id).await;
     }
     Ok(Json(codex_reachability_catalog()))
+}
+
+/// 从本端口的 `profile_binding` 取档案 id（仅当绑定的 app_type 与本端口服务的请求一致时）。
+///
+/// 端口按 `(app_type, profile_id)` 分配，实际不会跨 app；这层过滤是防御性的。
+fn bound_profile_id(state: &ProxyState) -> Option<String> {
+    state
+        .profile_binding
+        .as_ref()
+        .map(|(_app, pid)| pid.clone())
 }
 
 /// 按档案下发模型列表（`/p/<profile_id>/v1/models`）。
@@ -293,24 +263,13 @@ fn codex_reachability_catalog() -> Value {
 /// - 现在 OpenRouter 已推出 Claude Code 兼容接口，默认不再启用该转换（逻辑保留以备回退）
 pub async fn handle_messages(
     State(state): State<ProxyState>,
-    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
-    handle_messages_for_app(
-        state,
-        request,
-        AppType::Claude,
-        "Claude",
-        "claude",
-        None,
-        profile_id_of(&params),
-    )
-    .await
+    handle_messages_for_app(state, request, AppType::Claude, "Claude", "claude", None).await
 }
 
 pub async fn handle_claude_desktop_messages(
     State(state): State<ProxyState>,
-    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
     validate_claude_desktop_gateway_auth(&state, request.headers())?;
@@ -321,7 +280,6 @@ pub async fn handle_claude_desktop_messages(
         "Claude Desktop",
         "claude-desktop",
         Some("/claude-desktop"),
-        profile_id_of(&params),
     )
     .await
 }
@@ -349,7 +307,6 @@ async fn handle_messages_for_app(
     tag: &'static str,
     app_type_str: &'static str,
     strip_prefix: Option<&'static str>,
-    profile_id: Option<String>,
 ) -> Result<axum::response::Response, ProxyError> {
     let (parts, body) = request.into_parts();
     let method = parts.method.clone();
@@ -371,7 +328,6 @@ async fn handle_messages_for_app(
         app_type.clone(),
         tag,
         app_type_str,
-        profile_id.as_deref(),
     )
     .await?;
 
@@ -379,7 +335,6 @@ async fn handle_messages_for_app(
         .path_and_query()
         .map(|path_and_query| path_and_query.as_str())
         .unwrap_or(uri.path());
-    let raw_endpoint = strip_profile_prefix(raw_endpoint, profile_id.as_deref());
     let endpoint = strip_prefix
         .and_then(|prefix| raw_endpoint.strip_prefix(prefix))
         .unwrap_or(raw_endpoint);
@@ -896,10 +851,8 @@ fn decode_codex_request_body(
 /// 处理 /v1/chat/completions 请求（OpenAI Chat Completions API - Codex CLI）
 pub async fn handle_chat_completions(
     State(state): State<ProxyState>,
-    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
-    let profile_id = profile_id_of(&params);
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
     let uri = parts.uri;
@@ -921,7 +874,6 @@ pub async fn handle_chat_completions(
         AppType::Codex,
         "Codex",
         "codex",
-        profile_id.as_deref(),
     )
     .await?;
     let endpoint = endpoint_with_query(&uri, "/chat/completions");
@@ -972,23 +924,13 @@ pub async fn handle_chat_completions(
 /// 处理 /v1/responses 请求（OpenAI Responses API - Codex CLI 透传）
 pub async fn handle_responses(
     State(state): State<ProxyState>,
-    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
-    handle_responses_for_app(
-        state,
-        request,
-        AppType::Codex,
-        "Codex",
-        "codex",
-        profile_id_of(&params),
-    )
-    .await
+    handle_responses_for_app(state, request, AppType::Codex, "Codex", "codex").await
 }
 
 pub async fn handle_grokbuild_responses(
     State(state): State<ProxyState>,
-    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
     handle_responses_for_app(
@@ -997,7 +939,6 @@ pub async fn handle_grokbuild_responses(
         AppType::GrokBuild,
         "Grok Build",
         "grokbuild",
-        profile_id_of(&params),
     )
     .await
 }
@@ -1008,7 +949,6 @@ async fn handle_responses_for_app(
     app_type: AppType,
     tag: &'static str,
     app_type_str: &'static str,
-    profile_id: Option<String>,
 ) -> Result<axum::response::Response, ProxyError> {
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
@@ -1031,7 +971,6 @@ async fn handle_responses_for_app(
         app_type.clone(),
         tag,
         app_type_str,
-        profile_id.as_deref(),
     )
     .await?;
     let endpoint = endpoint_with_query(&uri, "/responses");
@@ -1129,23 +1068,13 @@ async fn handle_responses_for_app(
 /// 处理 /v1/responses/compact 请求（OpenAI Responses Compact API - Codex CLI 透传）
 pub async fn handle_responses_compact(
     State(state): State<ProxyState>,
-    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
-    handle_responses_compact_for_app(
-        state,
-        request,
-        AppType::Codex,
-        "Codex",
-        "codex",
-        profile_id_of(&params),
-    )
-    .await
+    handle_responses_compact_for_app(state, request, AppType::Codex, "Codex", "codex").await
 }
 
 pub async fn handle_grokbuild_responses_compact(
     State(state): State<ProxyState>,
-    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
     handle_responses_compact_for_app(
@@ -1154,7 +1083,6 @@ pub async fn handle_grokbuild_responses_compact(
         AppType::GrokBuild,
         "Grok Build",
         "grokbuild",
-        profile_id_of(&params),
     )
     .await
 }
@@ -1165,7 +1093,6 @@ async fn handle_responses_compact_for_app(
     app_type: AppType,
     tag: &'static str,
     app_type_str: &'static str,
-    profile_id: Option<String>,
 ) -> Result<axum::response::Response, ProxyError> {
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
@@ -1188,7 +1115,6 @@ async fn handle_responses_compact_for_app(
         app_type.clone(),
         tag,
         app_type_str,
-        profile_id.as_deref(),
     )
     .await?;
     let endpoint = endpoint_with_query(&uri, "/responses/compact");
@@ -2173,10 +2099,8 @@ fn compact_error_message(message: &str, max_chars: usize) -> String {
 pub async fn handle_gemini(
     State(state): State<ProxyState>,
     uri: axum::http::Uri,
-    params: ProfileParams,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
-    let profile_id = profile_id_of(&params);
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
     let headers = parts.headers;
@@ -2203,7 +2127,6 @@ pub async fn handle_gemini(
         AppType::Gemini,
         "Gemini",
         "gemini",
-        profile_id.as_deref(),
     )
     .await?
     .with_model_from_uri(&uri);
@@ -2213,8 +2136,6 @@ pub async fn handle_gemini(
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or(uri.path());
-    // Gemini 是逐字透传路径的那条链路，前缀一旦泄漏会直接打到上游错误路径。
-    let endpoint = strip_profile_prefix(endpoint, profile_id.as_deref());
 
     let is_stream = body
         .get("stream")
