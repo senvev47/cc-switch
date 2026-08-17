@@ -3479,6 +3479,24 @@ pub async fn open_profile_terminal(
 /// 终端进程重读时 baseUrl 不匹配会重新探测，仍拿到正确列表）。
 fn prime_gateway_models_cache(base_url: &str, p1_provider: &crate::provider::Provider) -> Result<(), String> {
     let models = crate::proxy::handlers::claude_model_list_from_provider(p1_provider);
+    // claude code 自己写缓存时每条模型只保留 {id, display_name}（不含 `type`），
+    // 这里对齐它的形状，避免 `u_n().map(...)` 因字段差异命中失败。
+    let models_arr: Vec<serde_json::Value> = models
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let id = m.get("id").and_then(|v| v.as_str())?;
+                    let display = m
+                        .get("display_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(id);
+                    Some(serde_json::json!({ "id": id, "display_name": display }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -3486,7 +3504,7 @@ fn prime_gateway_models_cache(base_url: &str, p1_provider: &crate::provider::Pro
     let entry = serde_json::json!({
         "baseUrl": base_url,
         "fetchedAt": now_ms,
-        "models": models.get("data").cloned().unwrap_or(serde_json::Value::Array(vec![])),
+        "models": models_arr,
     });
     let cache_dir = crate::config::get_claude_config_dir().join("cache");
     if !cache_dir.exists() {
@@ -3498,7 +3516,7 @@ fn prime_gateway_models_cache(base_url: &str, p1_provider: &crate::provider::Pro
     log::info!(
         "已预写 gateway-models 缓存: {} (baseUrl={base_url}, models={})",
         cache_path.display(),
-        entry["models"].as_array().map(|a| a.len()).unwrap_or(0)
+        models_arr.len()
     );
     Ok(())
 }

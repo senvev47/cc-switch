@@ -4,6 +4,9 @@
  * - 开关：读写 `PerTerminalRoutingConfig.enabled`（后端开关默认关闭）。
  *   关闭时会停掉所有档案端口 server（后端 `stop_all_profile_servers`），
  *   让「关闭」真正终止档案路由——否则已开的档案终端仍走其档案链路。
+ *   用 `useMutation` 管理挂起态，**不在点击过程中同步禁用 Switch**：
+ *   Radix Switch 在 pointer-down/up 之间被 disable 会丢弃点击（onCheckedChange
+ *   不触发），这正是「开关关不掉」的根因。
  * - 档案下拉：列出该应用的命名档案，点击某档案 = 为该档案开一个专属端口终端
  *   （`open_profile_terminal` → `start_profile_server` → `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`）。
  *   不同档案 = 不同端口 = 不同 baseUrl，claude code gateway 缓存按 baseUrl 隔离，互不串扰。
@@ -24,14 +27,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { settingsApi } from "@/lib/api/settings";
+import { settingsApi, type PerTerminalRoutingConfig } from "@/lib/api/settings";
 import { failoverProfilesApi } from "@/lib/api/failoverProfiles";
 import {
   useFailoverProfiles,
   toNamedFailoverProfiles,
 } from "@/lib/query/failoverProfiles";
 import { getFailoverProfileColorClass } from "@/components/providers/FailoverPriorityBadge";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import type { AppId } from "@/lib/api";
 
@@ -51,7 +54,6 @@ export function TerminalRoutingToggle({
   const { data: profiles } = useFailoverProfiles(activeApp);
   const named = toNamedFailoverProfiles(profiles);
   const [openingId, setOpeningId] = useState<string | null>(null);
-  const [toggling, setToggling] = useState(false);
 
   const { data: config } = useQuery({
     queryKey: ROUTING_CONFIG_KEY,
@@ -61,24 +63,25 @@ export function TerminalRoutingToggle({
   const enabled = config?.enabled ?? false;
   const currentPreset = config?.nextNewTerminalProfileIdByApp?.[activeApp];
 
-  const handleToggle = async (checked: boolean) => {
-    if (toggling) return;
-    setToggling(true);
-    try {
-      await settingsApi.setPerTerminalRoutingConfig({
-        enabled: checked,
-        nextNewTerminalProfileIdByApp:
-          config?.nextNewTerminalProfileIdByApp ?? null,
-      });
-      await queryClient.invalidateQueries({ queryKey: ROUTING_CONFIG_KEY });
-      await queryClient.invalidateQueries({
-        queryKey: ["failoverProfiles"],
-      });
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setToggling(false);
-    }
+  // 用 mutation 管理写：isPending 在 mutate 返回后的下一个微任务才置 true，
+  // 不会在 pointer-down/up 之间同步禁用 Switch（那会让 Radix 丢弃点击）。
+  const toggleMutation = useMutation({
+    mutationFn: (next: PerTerminalRoutingConfig) =>
+      settingsApi.setPerTerminalRoutingConfig(next),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ROUTING_CONFIG_KEY });
+      queryClient.invalidateQueries({ queryKey: ["failoverProfiles"] });
+    },
+    onError: (e) => toast.error(String(e)),
+  });
+
+  const handleToggle = (checked: boolean) => {
+    // 直接构造下一份配置并提交；不在过程中 setToggling（会同步禁用 Switch）。
+    toggleMutation.mutate({
+      enabled: checked,
+      nextNewTerminalProfileIdByApp:
+        config?.nextNewTerminalProfileIdByApp ?? null,
+    });
   };
 
   const handleSelectProfile = async (profileId: string) => {
@@ -144,16 +147,22 @@ export function TerminalRoutingToggle({
         "开启后，不同终端可绑定不同的故障转移链。",
       )}
     >
-      <Network
-        className={cn(
-          "h-4 w-4 transition-colors",
-          enabled ? "text-sky-500" : "text-muted-foreground",
-        )}
-      />
+      {toggleMutation.isPending ? (
+        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+      ) : (
+        <Network
+          className={cn(
+            "h-4 w-4 transition-colors",
+            enabled ? "text-sky-500" : "text-muted-foreground",
+          )}
+        />
+      )}
+      {/* 注意：不要在点击过程中同步禁用 Switch——Radix 在 pointer-down/up 间
+          被 disable 会丢弃 onCheckedChange。isPending 在 mutate 后的下一个 tick
+          才 true，已晚于点击完成。 */}
       <Switch
         checked={enabled}
         onCheckedChange={handleToggle}
-        disabled={toggling}
       />
       {named.length > 0 && (
         <Select value={selectValue} onValueChange={handleSelectProfile}>
