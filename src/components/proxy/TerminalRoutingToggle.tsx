@@ -76,6 +76,10 @@ export function TerminalRoutingToggle({
   });
 
   const handleToggle = (checked: boolean) => {
+    // 重复点击/事件冒泡保护：mutation 进行中直接忽略。
+    if (toggleMutation.isPending) return;
+    // 目标态与当前一致就不重复提交（避免 onClick 事件链重复触发）。
+    if (checked === enabled) return;
     // 直接构造下一份配置并提交；不在过程中 setToggling（会同步禁用 Switch）。
     toggleMutation.mutate({
       enabled: checked,
@@ -157,13 +161,18 @@ export function TerminalRoutingToggle({
           )}
         />
       )}
-      {/* 注意：不要在点击过程中同步禁用 Switch——Radix 在 pointer-down/up 间
-          被 disable 会丢弃 onCheckedChange。isPending 在 mutate 后的下一个 tick
-          才 true，已晚于点击完成。 */}
-      <Switch
-        checked={enabled}
-        onCheckedChange={handleToggle}
-      />
+      {/* 双保险：用外层 onClick 兜底切换。
+          实测在某些渲染上下文里 Radix Switch 的 onCheckedChange 不触发，
+          外层 onClick 仍能捕获点击，保证开关一定可切换。
+          防止重复触发：Switch 不再绑 onCheckedChange，只靠外层 onClick。 */}
+      <div
+        onClick={() => handleToggle(!enabled)}
+        className="cursor-pointer"
+        role="switch"
+        aria-checked={enabled}
+      >
+        <Switch checked={enabled} />
+      </div>
       {named.length > 0 && (
         <Select value={selectValue} onValueChange={handleSelectProfile}>
           <SelectTrigger className="h-7 w-[160px] text-xs gap-1 border-none bg-transparent shadow-none focus:ring-0 px-1">
