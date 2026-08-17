@@ -811,6 +811,12 @@ pub async fn set_per_terminal_routing_config(
         if let Err(e) = state.proxy_service.clear_all_session_routes().await {
             log::warn!("清除按终端会话路由绑定失败（非致命）: {e}");
         }
+        // 「档案即端口」模型下，关闭终端路由应同时停掉所有档案端口 server——
+        // 否则已开的档案终端仍走其档案链路，用户会感到「开关关不掉」。
+        // 端口映射保留在 DB，下次开启/开档案终端时按原端口复用，baseUrl 跨重启稳定。
+        if let Err(e) = state.proxy_service.stop_all_profile_servers().await {
+            log::warn!("停止档案端口 server 失败（非致命）: {e}");
+        }
     }
     Ok(true)
 }

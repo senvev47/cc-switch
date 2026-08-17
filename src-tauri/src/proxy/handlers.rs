@@ -176,7 +176,7 @@ const CLAUDE_ROLE_MODEL_ENV_KEYS: [(&str, &str); 4] = [
 /// **id 过滤**：claude code 只保留 id 匹配 `/(claude|anthropic)/i` 的条目。这里用更严格
 /// 的既有校验 `is_claude_safe_model_id`（要求 `claude-`/`anthropic.claude-` 前缀 + 角色
 /// 段），通过它的必然也能通过 claude code 的过滤。被跳过的条目**记日志**，不静默丢弃。
-fn claude_model_list_from_provider(provider: &crate::provider::Provider) -> Value {
+pub(crate) fn claude_model_list_from_provider(provider: &crate::provider::Provider) -> Value {
     let env = provider
         .settings_config
         .get("env")

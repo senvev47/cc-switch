@@ -3441,6 +3441,18 @@ pub async fn open_profile_terminal(
 
     log::info!("档案端口终端：app={app} profile={profileId} base={profile_base} P1={}", p1.name);
 
+    // 预写 claude code 的 gateway-models.json 缓存：把 baseUrl 设成该档案端口、
+    // models 设成该档案 P1 的模型列表。这样 claude code 启动时 `u_n()` 命中缓存
+    // （baseUrl === process.env.ANTHROPIC_BASE_URL）→ 立即返回正确模型列表，
+    // 不必等「发完消息」才异步刷新——解掉「模型列表与第一个档案一样 / 发完消息才切换」。
+    //
+    // 单文件缓存的串扰由此被控制：后开的终端覆盖前一个的条目，但前一个终端的 claude
+    // 进程若重新读缓存发现 baseUrl 不匹配会重新探测（`u_n()` 返回 [] → 重新 fetch）。
+    // 覆盖失败不阻断开终端——只是退回到「发完消息才刷新」的旧行为。
+    if let Err(e) = prime_gateway_models_cache(&profile_base, p1) {
+        log::warn!("预写 gateway-models 缓存失败（非致命，退回异步刷新）: {e}");
+    }
+
     // 配置文件名用档案 id，避免与 open_provider_terminal 的 provider 文件互相覆盖。
     // auto_launch_command=false：只打开终端窗口（已 cd + settings 文件就绪），
     // 用户自己输入 `claude --settings <file>` 启动，不自动进入。
@@ -3453,6 +3465,42 @@ pub async fn open_profile_terminal(
     .map_err(|e| format!("启动终端失败: {e}"))?;
 
     Ok(true)
+}
+
+/// 预写 claude code 的 `~/.claude/cache/gateway-models.json` 缓存。
+///
+/// claude code 2.1.x 启动时调 `u_n()` 读这个单文件缓存：若 `e.baseUrl ===
+/// process.env.ANTHROPIC_BASE_URL` 则直接用缓存模型（不重新探测），否则返回 `[]`
+/// 触发重新 fetch。后者会延迟到用户发第一条消息后才刷新 `/model` picker——
+/// 这正是「档案终端模型列表与第一个档案一样 / 发完消息才切换」的根因。
+///
+/// 本函数在开档案终端前主动写入该档案端口对应的条目，让 `u_n()` 命中、立即显示
+/// 正确模型。各档案端口不同 → 写入的 baseUrl 不同，互不串扰（后写覆盖前写，但前一个
+/// 终端进程重读时 baseUrl 不匹配会重新探测，仍拿到正确列表）。
+fn prime_gateway_models_cache(base_url: &str, p1_provider: &crate::provider::Provider) -> Result<(), String> {
+    let models = crate::proxy::handlers::claude_model_list_from_provider(p1_provider);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let entry = serde_json::json!({
+        "baseUrl": base_url,
+        "fetchedAt": now_ms,
+        "models": models.get("data").cloned().unwrap_or(serde_json::Value::Array(vec![])),
+    });
+    let cache_dir = crate::config::get_claude_config_dir().join("cache");
+    if !cache_dir.exists() {
+        std::fs::create_dir_all(&cache_dir).map_err(|e| format!("创建缓存目录失败: {e}"))?;
+    }
+    let cache_path = cache_dir.join("gateway-models.json");
+    let serialized = serde_json::to_string(&entry).map_err(|e| format!("序列化缓存失败: {e}"))?;
+    std::fs::write(&cache_path, serialized).map_err(|e| format!("写入缓存失败: {e}"))?;
+    log::info!(
+        "已预写 gateway-models 缓存: {} (baseUrl={base_url}, models={})",
+        cache_path.display(),
+        entry["models"].array().map(|a| a.len()).unwrap_or(0)
+    );
+    Ok(())
 }
 
 /// 从提供商配置中提取环境变量

@@ -1678,6 +1678,22 @@ impl ProxyService {
         Ok(())
     }
 
+    /// 停止所有档案端口 server（关闭终端路由总开关时调用）。
+    ///
+    /// 端口映射保留在 DB，下次开启/开档案终端时按原端口复用，baseUrl 跨重启稳定。
+    pub async fn stop_all_profile_servers(&self) -> Result<(), String> {
+        let bindings: Vec<(String, String)> = {
+            let guard = self.profile_servers.read().await;
+            guard.keys().cloned().collect()
+        };
+        for (app_type, profile_id) in bindings {
+            if let Err(e) = self.stop_profile_server(&app_type, &profile_id).await {
+                log::warn!("停止档案端口 server 失败（{app_type}/{profile_id}）: {e}");
+            }
+        }
+        Ok(())
+    }
+
     /// 重启所有档案端口 server（档案成员/配置变更后调用，复用既有端口保持 baseUrl 稳定）。
     pub async fn restart_all_profile_servers(&self) {
         let bindings: Vec<(String, String)> = {
