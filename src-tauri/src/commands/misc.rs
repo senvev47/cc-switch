@@ -4189,6 +4189,10 @@ fn launch_windows_terminal(
         )
     };
 
+    // 自删除用 `(goto) 2>nul & del "%~f0"` 惯用法：`goto)` 把当前行剩余部分和
+    // 批处理后续执行一起跳过，配合 `2>nul` 吞掉「找不到批处理文件」错误，
+    // 这样 cmd /K 模式下删除自身不会向终端打印错误（直接 `del "%~f0"` 会在
+    // 自删除后由 cmd 批处理读取器报「找不到批处理文件」）。
     let content = format!(
         "@echo off
 {cwd_command}
@@ -4196,7 +4200,7 @@ echo Using provider-specific claude config:
 echo {config_path_for_batch}
 {claude_line}
 {cleanup_line}
-del \"%~f0\" >nul 2>&1
+(goto) 2>nul & del \"%~f0\"
 ",
         cwd_command = cwd_command,
         config_path_for_batch = config_path_for_batch,

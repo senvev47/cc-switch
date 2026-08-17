@@ -229,6 +229,24 @@ fn default_false() -> bool {
     false
 }
 
+/// 反序列化 `HashMap`，允许 JSON `null`（退化为空 map）。
+///
+/// 前端在 `nextNewTerminalProfileIdByApp` 为空时可能传 `null` 而非 `{}`，
+/// `serde(default)` 只处理字段缺失、不处理显式 `null`，会报
+/// "invalid type: null, expected a map"。这里把 `null` 当成默认空 map。
+fn deserialize_nullable_map<'de, D, K, V>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<K, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    K: serde::Deserialize<'de> + std::hash::Hash + Eq,
+    V: serde::Deserialize<'de>,
+{
+    let opt: Option<std::collections::HashMap<K, V>> =
+        Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -363,7 +381,11 @@ pub struct PerTerminalRoutingConfig {
     ///
     /// key = app_type（如 `"claude"` / `"codex"`），value = 命名档案 id。
     /// 某 app 无对应键 = 该 app 的新终端走默认档案（共享队列，既有路径）。
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        deserialize_with = "deserialize_nullable_map"
+    )]
     pub next_new_terminal_profile_id_by_app: HashMap<String, String>,
     /// **已弃用**：旧版的全局单值预设，仅为读取历史配置保留。
     ///

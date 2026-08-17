@@ -81,10 +81,12 @@ export function TerminalRoutingToggle({
     // 目标态与当前一致就不重复提交（避免 onClick 事件链重复触发）。
     if (checked === enabled) return;
     // 直接构造下一份配置并提交；不在过程中 setToggling（会同步禁用 Switch）。
+    // 注意：nextNewTerminalProfileIdByApp 必须是对象（{}），不能是 null——
+    // 后端 HashMap 反序列化拒绝 null（"invalid type: null, expected a map"）。
     toggleMutation.mutate({
       enabled: checked,
       nextNewTerminalProfileIdByApp:
-        config?.nextNewTerminalProfileIdByApp ?? null,
+        config?.nextNewTerminalProfileIdByApp ?? {},
     });
   };
 
