@@ -260,7 +260,7 @@ impl ProxyServer {
         }
 
         // 2. 等待服务器任务结束（带 5 秒超时保护）
-        if let Some(handle) = self.server_handle.write().await.take() {
+        let result = if let Some(handle) = self.server_handle.write().await.take() {
             match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
                 Ok(Ok(())) => {
                     log::info!("[{}] 代理服务器已完全停止", log_srv::STOPPED);
@@ -280,7 +280,17 @@ impl ProxyServer {
             }
         } else {
             Ok(())
-        }
+        };
+
+        // 3. 清空 bound_port。`bound_port()` 在 `start()` 成功后被写入，此前永不被
+        //    清空——即使 server 已停止，`bound_port()` 仍返回 `Some(port)`。这会让
+        //    `start_profile_server` 的短路路径误判「端口仍在服务」并返回死端口
+        //    （终端 `ANTHROPIC_BASE_URL` 指向死端口 → claude code 网关发现失败 →
+        //    退回旧档案的 gateway-models 缓存）。`stop()` 完成后清空它，配合
+        //    `start_profile_server` 的 TCP liveness 探测，僵尸 server 不再能伪装存活。
+        *self.bound_port.write().await = None;
+
+        result
     }
 
     pub async fn get_status(&self) -> ProxyStatus {

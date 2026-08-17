@@ -1576,10 +1576,40 @@ impl ProxyService {
         app_type: &str,
         profile_id: &str,
     ) -> Result<u16, String> {
-        // 已在运行：直接返回绑定端口
-        if let Some(server) = self.profile_servers.read().await.get(&(app_type.to_string(), profile_id.to_string())) {
+        let key = (app_type.to_string(), profile_id.to_string());
+
+        // 已在运行：直接返回绑定端口——但先做一次 liveness 探测。
+        //
+        // `bound_port()` 在 `start()` 成功后被写入，且**永远不会被清空**（即使
+        // accept-loop 任务因 panic / 端口被外部抢占等原因死亡，`stop()` 也只清
+        // `status` 与 `start_time`，不动 `bound_port`，更不会从 `profile_servers`
+        // 移除自身条目）。因此「map 里有条目 + bound_port=Some」**不能**作为「端口
+        // 仍在服务」的证据。若直接短路返回，会拿到一个死端口：终端的
+        // `ANTHROPIC_BASE_URL` 指向死端口 → claude code 的网关发现 fetch 失败 → 退
+        // 回到 `gateway-models.json` 里**上一个档案**遗留的缓存（baseUrl 不匹配时
+        // `Y_n()` 返回 []，匹配时返回旧模型），这正是「切换到新档案后模型列表仍是
+        // 旧档案 / 终端用的还是旧端口」的根因之一。
+        //
+        // 探测策略：对 `bound_port` 发起一次 TCP 连接（127.0.0.1:<port>，200ms 超时）。
+        //   - 连得上：端口确在服务，短路返回。
+        //   - 连不上：条目是僵尸（server 已死但未清理）→ 移除并走下方重建路径，
+        //     复用 DB 里既有端口映射重新 `start()`，保证终端拿到的是真正在服务的端口。
+        if let Some(server) = self.profile_servers.read().await.get(&key).cloned() {
             if let Some(port) = server.bound_port().await {
-                return Ok(port);
+                if port_is_alive(port).await {
+                    return Ok(port);
+                }
+                // 僵尸 server：尽力 stop（释放 shutdown_tx / 等待任务退出，5s 超时），
+                // 然后从 map 移除并落到下方重建路径。stop 失败不阻断——下方
+                // `server.start()` 会重新 bind 同一端口；若旧 listener 仍未释放，
+                // bind 会失败并回滚端口映射，调用方拿到明确错误而非死端口。
+                log::warn!(
+                    "档案端口 server 僵尸（端口 {port} 无响应），重建: {app_type}/{profile_id}"
+                );
+                if let Err(e) = server.stop().await {
+                    log::warn!("停止僵尸档案端口 server 失败（忽略，继续重建）: {e}");
+                }
+                self.profile_servers.write().await.remove(&key);
             }
         }
 
@@ -3537,6 +3567,30 @@ impl ProxyService {
             log::info!("已清除应用 {app_type} 的按终端会话路由绑定");
         }
         Ok(())
+    }
+}
+
+/// 探测本地档案端口是否仍有 server 在服务。
+///
+/// 用于 `start_profile_server` 的短路路径：`profile_servers` 里可能存在
+/// 「accept-loop 已死但条目未清理」的僵尸 server（`bound_port` 永不被清空），
+/// 仅凭 map 命中 + `bound_port=Some` 不能证明端口活着。这里对
+/// `127.0.0.1:<port>` 发起一次极短超时（200ms）的 TCP 连接：
+///   - 连得上 → 端口在服务，可安全复用；
+///   - 连不上 / 超时 → 僵尸，调用方应移除死条目并重建 server。
+///
+/// 200ms 足以判定本机回环端口的存活性（正常 <1ms），同时不会显著拖慢开终端。
+async fn port_is_alive(port: u16) -> bool {
+    let addr = format!("127.0.0.1:{port}");
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await
+    {
+        Ok(Ok(_)) => true,
+        // 拒绝 / 超时 / 其它错误统一视为端口不在服务。
+        _ => false,
     }
 }
 
