@@ -3382,8 +3382,8 @@ pub async fn open_profile_terminal(
     app: String,
     #[allow(non_snake_case)] profileId: String,
     cwd: Option<String>,
-    /// 可选：恢复指定会话。claude → `-r <session>`，codex → `resume <session>`。
-    /// None / 空串 = 开新会话。
+    // 可选：恢复指定会话。claude → `-r <session>`，codex → `resume <session>`。
+    // None / 空串 = 开新会话。
     #[allow(non_snake_case)] resumeSession: Option<String>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
