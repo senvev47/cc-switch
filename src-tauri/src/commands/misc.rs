@@ -3352,7 +3352,7 @@ pub async fn open_provider_terminal(
     let env_vars = extract_env_vars_from_config(config, &app_type);
 
     // 根据平台启动终端，传入提供商ID用于生成唯一的配置文件名
-    launch_terminal_with_env(env_vars, &providerId, launch_cwd.as_deref(), true)
+    launch_terminal_with_env(env_vars, &providerId, launch_cwd.as_deref(), None)
         .map_err(|e| format!("启动终端失败: {e}"))?;
 
     Ok(true)
@@ -3382,6 +3382,9 @@ pub async fn open_profile_terminal(
     app: String,
     #[allow(non_snake_case)] profileId: String,
     cwd: Option<String>,
+    /// 可选：恢复指定会话。claude → `-r <session>`，codex → `resume <session>`。
+    /// None / 空串 = 开新会话。
+    #[allow(non_snake_case)] resumeSession: Option<String>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     let launch_cwd = resolve_launch_cwd(cwd)?;
@@ -3418,59 +3421,115 @@ pub async fn open_profile_terminal(
 
     // 以 P1 的配置为底（拿到它的模型角色键），再覆盖成"走代理 + 不带真实密钥"。
     let mut env_vars = extract_env_vars_from_config(&p1.settings_config, &app_type);
-    let overrides: Vec<(&str, String)> = vec![
-        ("ANTHROPIC_BASE_URL", profile_base.clone()),
-        (
-            "ANTHROPIC_AUTH_TOKEN",
-            crate::services::proxy::PROXY_TOKEN_PLACEHOLDER.to_string(),
-        ),
-        (
-            "ANTHROPIC_API_KEY",
-            crate::services::proxy::PROXY_TOKEN_PLACEHOLDER.to_string(),
-        ),
-        (
-            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-            "1".to_string(),
-        ),
-    ];
+
+    // 按 app_type 覆盖：把上游地址/凭据指向档案端口 + PROXY_MANAGED 占位。
+    // 真实密钥不进临时文件：同名键一律替换，不是追加。
+    let placeholder = crate::services::proxy::PROXY_TOKEN_PLACEHOLDER.to_string();
+    let overrides: Vec<(&str, String)> = match app_type {
+        AppType::Claude | AppType::ClaudeDesktop => vec![
+            ("ANTHROPIC_BASE_URL", profile_base.clone()),
+            ("ANTHROPIC_AUTH_TOKEN", placeholder.clone()),
+            ("ANTHROPIC_API_KEY", placeholder.clone()),
+            ("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1".to_string()),
+        ],
+        AppType::Codex => vec![
+            // codex 走 OpenAI 兼容协议，base url 键为 OPENAI_BASE_URL。
+            ("OPENAI_BASE_URL", profile_base.clone()),
+            ("OPENAI_API_KEY", placeholder.clone()),
+        ],
+        AppType::Gemini => vec![
+            ("GOOGLE_GEMINI_BASE_URL", profile_base.clone()),
+            ("GEMINI_API_KEY", placeholder.clone()),
+        ],
+        _ => vec![(app_base_url_env(&app_type), profile_base.clone())],
+    };
     for (key, value) in overrides {
-        // 真实密钥不进临时文件：同名键一律替换，不是追加。
         env_vars.retain(|(existing, _)| existing != key);
         env_vars.push((key.to_string(), value));
     }
 
-    log::info!("档案端口终端：app={app} profile={profileId} base={profile_base} P1={}", p1.name);
+    log::info!(
+        "档案端口终端：app={app} profile={profileId} base={profile_base} P1={} resume={}",
+        p1.name,
+        resumeSession.as_deref().unwrap_or("")
+    );
 
-    // 预写 claude code 的 gateway-models.json 缓存：把 baseUrl 设成该档案端口、
-    // models 设成该档案 P1 的模型列表。这样 claude code 启动时 `u_n()` 命中缓存
-    // （baseUrl === process.env.ANTHROPIC_BASE_URL）→ 立即返回正确模型列表，
-    // 不必等「发完消息」才异步刷新——解掉「模型列表与第一个档案一样 / 发完消息才切换」。
-    //
-    // 单文件缓存的串扰由此被控制：后开的终端覆盖前一个的条目，但前一个终端的 claude
-    // 进程若重新读缓存发现 baseUrl 不匹配会重新探测（`u_n()` 返回 [] → 重新 fetch）。
-    // 覆盖失败不阻断开终端——只是退回到「发完消息才刷新」的旧行为。
-    if let Err(e) = prime_gateway_models_cache(&profile_base, p1) {
-        log::warn!("预写 gateway-models 缓存失败（非致命，退回异步刷新）: {e}");
+    // 仅 claude 系预写 gateway-models 缓存（codex/gemini 无此机制）。
+    if matches!(app_type, AppType::Claude | AppType::ClaudeDesktop) {
+        if let Err(e) = prime_gateway_models_cache(&profile_base, p1) {
+            log::warn!("预写 gateway-models 缓存失败（非致命，退回异步刷新）: {e}");
+        }
     }
 
-    // 配置文件名用档案 id，避免与 open_provider_terminal 的 provider 文件互相覆盖。
-    //
-    // auto_launch_command=true：自动用 `claude --settings <file>` 启动 claude code，
-    // 让临时 settings 文件里的 env（ANTHROPIC_BASE_URL=档案端口、PROXY_MANAGED 凭据、
-    // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1）真正生效。
-    //
-    // 之前传 false 只开终端 shell 不自动启动 claude，用户手敲 `claude`（不带
-    // --settings）会走 claude 的全局默认配置（主端口 15721 / 共享队列），档案端口
-    // 15722/15723 形同虚设——这正是「新档案终端仍走默认路由」的根因。
+    // 构建要执行的命令。claude 系用 `--settings <file>` 注入 env；
+    // codex/gemini 不支持 settings 文件，靠进程环境变量（.bat/sh 的 env 注入）生效。
+    let resume = resumeSession
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let launch_command = build_profile_launch_command(&app_type, &profile_base, resume);
+
+    // 配置文件名用档案 id + 纳秒后缀（launch_terminal_with_env 内部再保证唯一），
+    // 避免与 open_provider_terminal 的 provider 文件互相覆盖。
     launch_terminal_with_env(
         env_vars,
         &format!("profile_{profileId}"),
         launch_cwd.as_deref(),
-        true,
+        Some(launch_command),
     )
     .map_err(|e| format!("启动终端失败: {e}"))?;
 
     Ok(true)
+}
+
+/// 返回某 app_type 对应的「base url」环境变量键（用于不支持 settings 文件的应用，
+/// 兜底覆盖上游地址为档案端口）。
+fn app_base_url_env(app_type: &AppType) -> &'static str {
+    match app_type {
+        AppType::Claude | AppType::ClaudeDesktop => "ANTHROPIC_BASE_URL",
+        AppType::Codex => "OPENAI_BASE_URL",
+        AppType::Gemini => "GOOGLE_GEMINI_BASE_URL",
+        _ => "ANTHROPIC_BASE_URL",
+    }
+}
+
+/// 构建档案终端的启动命令。
+///
+/// - claude/claude-desktop：`claude --settings "<file>" --dangerously-skip-permissions`，
+///   可选追加 `-r <session>`。env（ANTHROPIC_BASE_URL=档案端口等）通过 settings 文件注入。
+/// - codex：`codex --dangerously-bypass-approvals-and-sandbox`，可选追加 `resume <session>`。
+///   codex 不支持 settings 文件，env 通过 .bat/sh 的进程环境变量注入。
+/// - gemini/其它：暂不支持自动启动，返回仅 echo 的提示行（用户手动运行）。
+///
+/// `config_file` 由 `launch_terminal_with_env` 写入（write_claude_config），这里只需路径。
+fn build_profile_launch_command(
+    app_type: &AppType,
+    _profile_base: &str,
+    _resume: Option<&str>,
+) -> String {
+    // 实际 config_file 路径由 launch_terminal_with_env 决定，本函数只产出命令骨架；
+    // claude 的 --settings 路径由调用方通过 launch_terminal_with_env 内部的 config_file
+    // 拼接。为保持架构一致，这里不直接拼路径——改由各平台 launcher 在注入时替换占位。
+    // 但当前 launcher 已把 config_file 路径固定写入，所以 claude 分支直接引用占位常量，
+    // 由 `launch_terminal_with_env` 的 config_file 替换。
+    match app_type {
+        AppType::Claude | AppType::ClaudeDesktop => {
+            // 路径占位 __CC_SWITCH_SETTINGS_FILE__ 由 launch_terminal_with_env 替换。
+            let mut cmd = String::from("claude --settings \"__CC_SWITCH_SETTINGS_FILE__\" --dangerously-skip-permissions");
+            if let Some(sess) = _resume {
+                cmd.push_str(&format!(" -r {sess}"));
+            }
+            cmd
+        }
+        AppType::Codex => {
+            let mut cmd = String::from("codex --dangerously-bypass-approvals-and-sandbox");
+            if let Some(sess) = _resume {
+                cmd.push_str(&format!(" resume {sess}"));
+            }
+            cmd
+        }
+        _ => String::from("echo Profile terminal for this app type is not auto-launched"),
+    }
 }
 
 /// 预写 claude code 的 `~/.claude/cache/gateway-models.json` 缓存。
@@ -3617,19 +3676,25 @@ fn resolve_launch_cwd(cwd: Option<String>) -> Result<Option<PathBuf>, String> {
 /// 创建临时配置文件并启动 claude 终端
 /// 使用 --settings 参数传入提供商特定的 API 配置
 ///
-/// `auto_launch_command`：
-/// - `true`：终端启动后自动执行 `claude --settings <file>`（既有行为，供应商终端）；
-/// - `false`：只打开终端窗口（已 `cd` 到目标目录、环境变量通过 settings 文件注入），
-///   **不**自动进入 claude/codex——让用户自己输入命令（档案终端诉求）。
+/// `launch_command`：
+/// - `Some(cmd)`：终端 `cd` 后自动执行 `cmd`（已 escape，直接拼进 .bat/sh）。
+///   供 `open_profile_terminal` 传入 `claude --settings "<file>" --dangerously-skip-permissions`
+///   或 `codex --dangerously-bypass-approvals-and-sandbox`。
+/// - `None`：退回既有「`claude --settings <file>`」行为（供应商终端 `open_provider_terminal`）。
 fn launch_terminal_with_env(
     env_vars: Vec<(String, String)>,
     provider_id: &str,
     cwd: Option<&Path>,
-    auto_launch_command: bool,
+    launch_command: Option<String>,
 ) -> Result<(), String> {
     let temp_dir = std::env::temp_dir();
+    // 文件名加纳秒时间戳，允许多个档案终端并存（之前固定 pid → 同名互踩，第二个开不出来）。
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let config_file = temp_dir.join(format!(
-        "claude_{}_{}.json",
+        "claude_{}_{}_{uniq}.json",
         provider_id,
         std::process::id()
     ));
@@ -3637,27 +3702,33 @@ fn launch_terminal_with_env(
     // 创建并写入配置文件
     write_claude_config(&config_file, &env_vars)?;
 
+    // 用实际配置文件路径替换命令里的占位符（claude --settings 路径）。
+    let launch_command = launch_command.map(|cmd| {
+        cmd.replace("__CC_SWITCH_SETTINGS_FILE__", &config_file.to_string_lossy())
+    });
+
     #[cfg(target_os = "macos")]
     {
-        launch_macos_terminal(&config_file, cwd, auto_launch_command)?;
+        launch_macos_terminal(&config_file, cwd, launch_command, &env_vars)?;
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
     {
-        launch_linux_terminal(&config_file, cwd, auto_launch_command)?;
+        launch_linux_terminal(&config_file, cwd, launch_command, &env_vars)?;
         Ok(())
     }
 
     #[cfg(target_os = "windows")]
     {
-        launch_windows_terminal(&temp_dir, &config_file, cwd, auto_launch_command)?;
+        launch_windows_terminal(&temp_dir, &config_file, cwd, launch_command, &env_vars)?;
         Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let _ = auto_launch_command;
+        let _ = launch_command;
+        let _ = &env_vars;
         Err("不支持的操作系统".to_string())
     }
 }
@@ -3686,11 +3757,15 @@ fn write_claude_config(
 }
 
 /// macOS: 根据用户首选终端启动
+///
+/// `launch_command`：`Some(cmd)` → `cd` 后执行 `cmd`（已为 shell 转义）；
+/// `None` → 退回 `claude --settings <file>`（供应商终端既有行为）。
 #[cfg(target_os = "macos")]
 fn launch_macos_terminal(
     config_file: &std::path::Path,
     cwd: Option<&Path>,
-    auto_launch_command: bool,
+    launch_command: Option<String>,
+    env_vars: &[(String, String)],
 ) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -3705,22 +3780,35 @@ fn launch_macos_terminal(
     let script_file = temp_dir.join(format!("cc_switch_launcher_{}.sh", std::process::id()));
     let config_path = config_file.to_string_lossy();
 
-    // auto_launch_command=false 时只打开终端并 cd，不自动进入 claude/codex（档案终端）。
-    // settings 文件保留（用户需手动 `claude --settings <file>` 启动）。
-    let (provider_block, cleanup_block) = if auto_launch_command {
+    // 有 command 时直接执行它（档案终端：claude --settings ... --dangerously-skip-permissions / codex ...）；
+    // 无 command 时退回供应商终端既有行为（claude --settings <file>）。
+    // 同时把 env_vars export 进进程环境（codex/gemini 没有 settings 文件机制，必须靠进程环境变量）。
+    let env_export_lines: String = env_vars
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "export {}={}",
+                shell_single_quote(k),
+                shell_single_quote(v)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (provider_block, cleanup_block) = if let Some(cmd) = launch_command.as_deref() {
+        let cd_prefix = cwd
+            .map(|dir| format!("cd {} && ", shell_single_quote(&dir.to_string_lossy())))
+            .unwrap_or_default();
+        (
+            format!("echo \"Launching: {cmd}\"\n{env_export_lines}\n{cd_prefix}{cmd}\n"),
+            format!("trap 'rm -f \"{config_path}\" \"{script_file}\"' EXIT\n"),
+        )
+    } else {
         let provider_command = build_provider_command_line(&shell, &config_path, cwd);
         (
             format!(
                 "echo \"Using provider-specific claude config:\"\necho \"{config_path}\"\n{provider_command}\n"
             ),
             format!("trap 'rm -f \"{config_path}\" \"{script_file}\"' EXIT\n"),
-        )
-    } else {
-        (
-            format!(
-                "echo \"Profile settings: {config_path}\"\necho \"Type: claude --settings '{config_path}'\"\n"
-            ),
-            format!("trap 'rm -f \"{script_file}\"' EXIT\n"),
         )
     };
 
@@ -4031,7 +4119,8 @@ fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
 fn launch_linux_terminal(
     config_file: &std::path::Path,
     cwd: Option<&Path>,
-    auto_launch_command: bool,
+    launch_command: Option<String>,
+    env_vars: &[(String, String)],
 ) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
@@ -4059,21 +4148,33 @@ fn launch_linux_terminal(
     let script_file = temp_dir.join(format!("cc_switch_launcher_{}.sh", std::process::id()));
     let config_path = config_file.to_string_lossy();
 
-    // auto_launch_command=false 时只打开终端并 cd，不自动进入 claude/codex（档案终端）。
-    let (provider_block, cleanup_block) = if auto_launch_command {
+    // 进程环境变量注入（codex/gemini 没有 settings 文件机制，必须 export 进进程环境）。
+    let env_export_lines: String = env_vars
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "export {}={}",
+                shell_single_quote(k),
+                shell_single_quote(v)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (provider_block, cleanup_block) = if let Some(cmd) = launch_command.as_deref() {
+        let cd_prefix = cwd
+            .map(|dir| format!("cd {} && ", shell_single_quote(&dir.to_string_lossy())))
+            .unwrap_or_default();
+        (
+            format!("echo \"Launching: {cmd}\"\n{env_export_lines}\n{cd_prefix}{cmd}\n"),
+            format!("trap 'rm -f \"{config_path}\" \"{script_file}\"' EXIT\n"),
+        )
+    } else {
         let provider_command = build_provider_command_line(&shell, &config_path, cwd);
         (
             format!(
                 "echo \"Using provider-specific claude config:\"\necho \"{config_path}\"\n{provider_command}\n"
             ),
             format!("trap 'rm -f \"{config_path}\" \"{script_file}\"' EXIT\n"),
-        )
-    } else {
-        (
-            format!(
-                "echo \"Profile settings: {config_path}\"\necho \"Type: claude --settings '{config_path}'\"\n"
-            ),
-            format!("trap 'rm -f \"{script_file}\"' EXIT\n"),
         )
     };
 
@@ -4164,36 +4265,59 @@ fn which_command(cmd: &str) -> bool {
 }
 
 /// Windows: 根据用户首选终端启动
+///
+/// `launch_command`：`Some(cmd)` → `cd` 后执行 `cmd`（档案终端：
+/// claude --settings "..." --dangerously-skip-permissions / codex --dangerously-bypass-approvals-and-sandbox）；
+/// `None` → 退回 `claude --settings <file>`（供应商终端既有行为）。
 #[cfg(target_os = "windows")]
 fn launch_windows_terminal(
     temp_dir: &std::path::Path,
     config_file: &std::path::Path,
     cwd: Option<&Path>,
-    auto_launch_command: bool,
+    launch_command: Option<String>,
+    env_vars: &[(String, String)],
 ) -> Result<(), String> {
     let preferred = crate::settings::get_preferred_terminal();
     let terminal = preferred.as_deref().unwrap_or("cmd");
 
-    let bat_file = temp_dir.join(format!("cc_switch_claude_{}.bat", std::process::id()));
+    // bat 文件名加纳秒时间戳，允许多个终端并存（之前固定 pid → 同名，第二个开不出来）。
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let bat_file = temp_dir.join(format!("cc_switch_claude_{}_{uniq}.bat", std::process::id()));
     let config_path_for_batch = escape_windows_batch_value(&config_file.to_string_lossy());
     let cwd_command = build_windows_cwd_command(cwd);
 
-    // auto_launch_command=false 时只打开终端并 cd，不自动进入 claude/codex（档案终端）。
-    // 此时也不删除 settings 文件——用户需自行 `claude --settings <file>` 启动，文件要保留。
-    let (claude_line, cleanup_line) = if auto_launch_command {
+    // 有 command 时执行它；无 command 退回供应商终端既有行为。
+    let (claude_line, cleanup_line) = if let Some(cmd) = launch_command.as_deref() {
         (
-            format!("claude --settings \"{}\"", config_path_for_batch),
+            cmd.to_string(),
             format!("del \"{}\" >nul 2>&1", config_path_for_batch),
         )
     } else {
         (
-            format!(
-                "echo Profile settings: {}\necho Type: claude --settings \"{}\"",
-                config_path_for_batch, config_path_for_batch
-            ),
-            String::new(), // 不删 settings，留给用户手动引用
+            format!("claude --settings \"{}\"", config_path_for_batch),
+            format!("del \"{}\" >nul 2>&1", config_path_for_batch),
         )
     };
+
+    // 进程环境变量注入：对每个 env_var 写 `set KEY=VALUE` 行。
+    // claude 系靠 `--settings <file>` 注入 env，这里重复设置无害（--settings 会覆盖）；
+    // codex/gemini 没有 settings 文件机制，**必须**在这里 set 进程环境变量，否则
+    // 命令行跑 codex 时看不到 OPENAI_BASE_URL/OPENAI_API_KEY。
+    // value 走 escape_windows_batch_value 防止 `&`/`%` 等破坏 .bat。
+    let env_set_lines: String = env_vars
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "set \"{}={}\"",
+                escape_windows_batch_value(k),
+                escape_windows_batch_value(v)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
 
     // 自删除用 `(goto) 2>nul & del "%~f0"` 惯用法：`goto)` 把当前行剩余部分和
     // 批处理后续执行一起跳过，配合 `2>nul` 吞掉「找不到批处理文件」错误，
@@ -4202,6 +4326,7 @@ fn launch_windows_terminal(
     let content = format!(
         "@echo off
 {cwd_command}
+{env_set_lines}
 echo Using provider-specific claude config:
 echo {config_path_for_batch}
 {claude_line}
@@ -4209,6 +4334,7 @@ echo {config_path_for_batch}
 (goto) 2>nul & del \"%~f0\"
 ",
         cwd_command = cwd_command,
+        env_set_lines = env_set_lines,
         config_path_for_batch = config_path_for_batch,
         claude_line = claude_line,
         cleanup_line = cleanup_line,

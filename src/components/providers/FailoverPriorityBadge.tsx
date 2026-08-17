@@ -37,6 +37,29 @@ export function getFailoverProfileColorClass(colorIndex: number): string {
 }
 
 /**
+ * 命名档案配色板的「卡片边框」变体：border + shadow。
+ *
+ * 用于把整个供应商卡片染成其所属命名档案的颜色——当供应商在某个命名档案中时，
+ * 卡片边框取该档案配色，与档案徽章同色，视觉上一眼可见该 provider 归属哪个档案。
+ * 优先级低于 activeProvider 的绿色边框（active 时仍显示绿色）。
+ */
+const PROFILE_BORDER_COLORS = [
+  "border-sky-500/60 shadow-sm shadow-sky-500/10",
+  "border-violet-500/60 shadow-sm shadow-violet-500/10",
+  "border-amber-500/60 shadow-sm shadow-amber-500/10",
+  "border-rose-500/60 shadow-sm shadow-rose-500/10",
+  "border-cyan-500/60 shadow-sm shadow-cyan-500/10",
+  "border-fuchsia-500/60 shadow-sm shadow-fuchsia-500/10",
+] as const;
+
+/** 取档案边框配色（与 `getFailoverProfileColorClass` 同索引，保证徽章与卡片同色）。 */
+export function getFailoverProfileBorderColorClass(colorIndex: number): string {
+  const len = PROFILE_BORDER_COLORS.length;
+  const safe = ((Math.trunc(colorIndex) % len) + len) % len;
+  return PROFILE_BORDER_COLORS[safe];
+}
+
+/**
  * 故障转移优先级徽章
  * 显示供应商在故障转移队列（或某个命名档案）中的优先级顺序
  */

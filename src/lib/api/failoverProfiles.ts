@@ -87,16 +87,21 @@ export const failoverProfilesApi = {
     });
   },
 
-  /** 打开一个绑定到该命名档案的终端。cwd 缺省时由后端决定工作目录。 */
+  /** 打开一个绑定到该命名档案的终端。cwd 缺省时由后端决定工作目录。
+   *  resumeSession 可选：claude → `-r <id>`，codex → `resume <id>`。空串=新会话。 */
   async openProfileTerminal(
     appType: string,
     profileId: string,
     cwd?: string,
+    resumeSession?: string,
   ): Promise<void> {
     return invoke("open_profile_terminal", {
       app: appType,
       profileId,
       cwd,
+      resumeSession: resumeSession && resumeSession.trim().length > 0
+        ? resumeSession.trim()
+        : null,
     });
   },
 };

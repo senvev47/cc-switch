@@ -236,9 +236,22 @@ export function FailoverProfilesPanel({
     }
     // 用户取消选择目录 → 静默中止
     if (!cwd) return;
+    // 可选：恢复指定会话。留空=新会话。
+    const resumeSession = window.prompt(
+      t(
+        "proxy.failoverProfiles.resumeSessionPrompt",
+        "可选：恢复会话 ID（留空=新会话）。claude 用 `-r <id>`，codex 用 `resume <id>`。",
+      ),
+      "",
+    );
     setOpeningTerminalId(profileId);
     try {
-      await failoverProfilesApi.openProfileTerminal(appType, profileId, cwd);
+      await failoverProfilesApi.openProfileTerminal(
+        appType,
+        profileId,
+        cwd,
+        resumeSession ?? undefined,
+      );
       toast.success(
         t("proxy.failoverProfiles.openTerminalSuccess", "已打开绑定该档案的终端"),
         { closeButton: true },

@@ -121,9 +121,22 @@ export function TerminalRoutingToggle({
       return;
     }
     if (!cwd) return;
+    // 可选：恢复指定会话。留空=新会话。claude → `-r <id>`，codex → `resume <id>`。
+    const resumeSession = window.prompt(
+      t(
+        "proxy.failoverProfiles.resumeSessionPrompt",
+        "可选：恢复会话 ID（留空=新会话）。claude 用 `-r <id>`，codex 用 `resume <id>`。",
+      ),
+      "",
+    );
     setOpeningId(profileId);
     try {
-      await failoverProfilesApi.openProfileTerminal(activeApp, profileId, cwd);
+      await failoverProfilesApi.openProfileTerminal(
+        activeApp,
+        profileId,
+        cwd,
+        resumeSession ?? undefined,
+      );
       toast.success(
         t("proxy.failoverProfiles.openTerminalSuccess", "已打开绑定该档案的终端"),
         { closeButton: true },

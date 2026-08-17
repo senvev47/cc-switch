@@ -19,7 +19,7 @@ import { PROVIDER_TYPES, TEMPLATE_TYPES } from "@/config/constants";
 import { isHermesReadOnlyProvider } from "@/config/hermesProviderPresets";
 import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
 import { HealthStatusIndicator } from "@/components/providers/HealthStatusIndicator";
-import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBadge";
+import { FailoverPriorityBadge, getFailoverProfileBorderColorClass } from "@/components/providers/FailoverPriorityBadge";
 import type { StreamCheckResult } from "@/lib/api/connectivity-check";
 import {
   extractCodexBaseUrl,
@@ -334,6 +334,14 @@ export function ProviderCard({
       !isProxyTakeover &&
       (isActiveProvider || hasPersistentConfigHighlight));
 
+  // 「档案即颜色」：当供应商在某个命名档案中，且当前不是 active（绿/蓝）时，
+  // 卡片边框染成该档案的配色（取首个档案，多档案时以主档案为准）。
+  // 优先级低于 active 高亮，避免视觉冲突。
+  const profileBorderClass =
+    !shouldUseGreen && !shouldUseBlue && (profileBadges?.length ?? 0) > 0
+      ? getFailoverProfileBorderColorClass(profileBadges![0].colorIndex)
+      : "";
+
   return (
     <div
       className={cn(
@@ -345,6 +353,7 @@ export function ProviderCard({
         shouldUseGreen &&
           "border-emerald-500/60 shadow-sm shadow-emerald-500/10",
         shouldUseBlue && "border-blue-500/60 shadow-sm shadow-blue-500/10",
+        profileBorderClass,
         !(isActiveProvider || hasPersistentConfigHighlight) &&
           "hover:shadow-sm",
         dragHandleProps?.isDragging &&
