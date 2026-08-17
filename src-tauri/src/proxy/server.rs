@@ -59,6 +59,11 @@ pub struct ProxyState {
 }
 
 /// 代理HTTP服务器
+///
+/// `#[derive(Clone)]`：所有字段均为 `Arc`，克隆廉价。`ProxyService::start_profile_server`
+/// 需要从 `profile_servers` map 中克隆一份 server 句柄，以便在释放读锁后对其做
+/// liveness 探测 / `stop()`（避免读锁期间持锁等待 TCP/IO）。
+#[derive(Clone)]
 pub struct ProxyServer {
     config: ProxyConfig,
     state: ProxyState,
