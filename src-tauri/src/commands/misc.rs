@@ -3498,7 +3498,7 @@ fn prime_gateway_models_cache(base_url: &str, p1_provider: &crate::provider::Pro
     log::info!(
         "已预写 gateway-models 缓存: {} (baseUrl={base_url}, models={})",
         cache_path.display(),
-        entry["models"].array().map(|a| a.len()).unwrap_or(0)
+        entry["models"].as_array().map(|a| a.len()).unwrap_or(0)
     );
     Ok(())
 }
