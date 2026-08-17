@@ -3454,13 +3454,19 @@ pub async fn open_profile_terminal(
     }
 
     // 配置文件名用档案 id，避免与 open_provider_terminal 的 provider 文件互相覆盖。
-    // auto_launch_command=false：只打开终端窗口（已 cd + settings 文件就绪），
-    // 用户自己输入 `claude --settings <file>` 启动，不自动进入。
+    //
+    // auto_launch_command=true：自动用 `claude --settings <file>` 启动 claude code，
+    // 让临时 settings 文件里的 env（ANTHROPIC_BASE_URL=档案端口、PROXY_MANAGED 凭据、
+    // CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1）真正生效。
+    //
+    // 之前传 false 只开终端 shell 不自动启动 claude，用户手敲 `claude`（不带
+    // --settings）会走 claude 的全局默认配置（主端口 15721 / 共享队列），档案端口
+    // 15722/15723 形同虚设——这正是「新档案终端仍走默认路由」的根因。
     launch_terminal_with_env(
         env_vars,
         &format!("profile_{profileId}"),
         launch_cwd.as_deref(),
-        false,
+        true,
     )
     .map_err(|e| format!("启动终端失败: {e}"))?;
 
