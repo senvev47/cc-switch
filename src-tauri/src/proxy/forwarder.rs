@@ -251,9 +251,6 @@ impl RequestForwarder {
             is_profile_port,
         }
     }
-            max_attempts,
-        }
-    }
 
     async fn record_success_result(
         &self,
