@@ -350,10 +350,7 @@ export function ProviderCard({
   const profileBgClass = hasProfile
     ? getFailoverProfileBgColorClass(p1Badges[0].colorIndex)
     : "";
-  const profileBorderClass2 =
-    p1Badges.length > 1
-      ? getFailoverProfileBorderColorClass(p1Badges[1].colorIndex)
-      : "";
+  // 双档案 P1 拆分时只做底色左右各半，边框不染（半边色边框用 Tailwind 难以稳定表达）。
   const profileBgClass2 =
     p1Badges.length > 1
       ? getFailoverProfileBgColorClass(p1Badges[1].colorIndex)
