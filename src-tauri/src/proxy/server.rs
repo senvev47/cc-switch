@@ -83,7 +83,7 @@ fn bind_listener_with_reuse_and_fallback(
                 return Ok((listener, addr));
             }
             Err(e) => {
-                last_err = Some(e);
+                last_err = Some(e.to_string());
             }
         }
     }
