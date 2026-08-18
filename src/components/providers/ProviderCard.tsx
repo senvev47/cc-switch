@@ -87,6 +87,8 @@ interface ProviderCardProps {
   namedFailoverProfiles?: { profileId: string; name: string }[];
   /** 将本 provider 加入命名档案。 */
   onAddToNamedProfile?: (profileId: string) => void;
+  /** 将本 provider 从命名档案移除（退出档案）。传入待退出的 profileId。 */
+  onRemoveFromNamedProfile?: (profileId: string) => void;
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
   // OpenClaw: default model
   isDefaultModel?: boolean;
@@ -193,6 +195,7 @@ export function ProviderCard({
   onToggleFailover,
   namedFailoverProfiles,
   onAddToNamedProfile,
+  onRemoveFromNamedProfile,
   activeProviderId,
   // OpenClaw: default model
   isDefaultModel,
@@ -712,6 +715,8 @@ export function ProviderCard({
               onToggleFailover={onToggleFailover}
               namedFailoverProfiles={namedFailoverProfiles}
               onAddToNamedProfile={onAddToNamedProfile}
+              onRemoveFromNamedProfile={onRemoveFromNamedProfile}
+              profileBadges={profileBadges}
               // OpenClaw: default model
               isDefaultModel={isDefaultModel}
               defaultModelOptions={openclawDefaultModelOptions}

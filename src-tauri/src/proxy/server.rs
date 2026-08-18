@@ -544,10 +544,18 @@ impl ProxyServer {
     }
 
     /// 重置指定 Provider 的熔断器
-    pub async fn reset_provider_circuit_breaker(&self, provider_id: &str, app_type: &str) {
+    ///
+    /// `profile_id` 为 `None` 时重置主端口共享 key 的熔断器；为 `Some(pid)` 时
+    /// 重置档案端口专属 key。现有命令调用方传 `None`（主端口重置）。
+    pub async fn reset_provider_circuit_breaker(
+        &self,
+        provider_id: &str,
+        app_type: &str,
+        profile_id: Option<&str>,
+    ) {
         self.state
             .provider_router
-            .reset_provider_breaker(provider_id, app_type)
+            .reset_provider_breaker(provider_id, app_type, profile_id)
             .await;
     }
 

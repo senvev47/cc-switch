@@ -74,6 +74,8 @@ import {
   useFailoverProfiles,
   useFailoverProfileMembersMany,
   useAddProviderToFailoverProfile,
+  useRemoveProviderFromFailoverProfile,
+  useReorderFailoverProfileMembers,
   toNamedFailoverProfiles,
 } from "@/lib/query/failoverProfiles";
 import {
@@ -350,6 +352,8 @@ export function ProviderList({
   const removeFromQueue = useRemoveFromFailoverQueue();
   const { data: failoverProfilesData } = useFailoverProfiles(appId);
   const addProviderToProfile = useAddProviderToFailoverProfile();
+  const removeProviderFromProfile = useRemoveProviderFromFailoverProfile();
+  const reorderProfileMembers = useReorderFailoverProfileMembers();
   /** 命名档案（按 sortIndex 稳定排序，带固定配色索引）。 */
   const orderedNamedProfiles = useMemo(
     () => toNamedFailoverProfiles(failoverProfilesData),
@@ -372,10 +376,15 @@ export function ProviderList({
     appId,
     namedProfileIds,
   );
-  /** providerId → 命名档案徽章（一个供应商可同时属于多个档案，故为数组）。 */
+  /** providerId → 命名档案徽章（一个供应商可同时属于多个档案，故为数组）。
+   *
+   * 仅收录「已启动」的档案（`port != null`）：档案端口 server 在跑才会真正使用这些
+   * 供应商；未启动档案的成员只是配置事实，不应影响卡片外观（染色）或「退出档案」
+   * 下拉项。`port` 在 server 启动时写入、停止/失败时清除，是可靠的「在用」信号。 */
   const profileBadgesByProviderId = useMemo(() => {
     const map = new Map<string, ProviderProfileBadge[]>();
     orderedNamedProfiles.forEach((profile, profileIdx) => {
+      if (!profile.port) return; // 只给已启动（有端口且 server 在跑）的档案染色
       const members = namedProfileMembers[profileIdx];
       if (!members) return;
       members.forEach((member, memberIdx) => {
@@ -420,6 +429,30 @@ export function ProviderList({
     [appId, addProviderToProfile, t],
   );
 
+  const handleRemoveFromNamedProfile = useCallback(
+    (providerId: string, profileId: string) => {
+      removeProviderFromProfile.mutate(
+        { appType: appId, providerId, profileId },
+        {
+          onSuccess: () =>
+            toast.success(
+              t("failover.removedFromProfile", { defaultValue: "已退出档案" }),
+              { closeButton: true },
+            ),
+          onError: (e) =>
+            toast.error(
+              t("failover.removeFromProfileFailed", {
+                defaultValue: "退出档案失败",
+              }) +
+                ": " +
+                String(e),
+            ),
+        },
+      );
+    },
+    [appId, removeProviderFromProfile, t],
+  );
+
   const isFailoverModeActive =
     isProxyTakeover === true && isAutoFailoverEnabled === true;
   const failoverQueueProviderIds = useMemo(
@@ -430,6 +463,72 @@ export function ProviderList({
   const isOpenCode = appId === "opencode";
   const { data: currentOmoId } = useCurrentOmoProviderId(isOpenCode);
   const { data: currentOmoSlimId } = useCurrentOmoSlimProviderId(isOpenCode);
+
+  // 拖动卡片时：除了更新全局 providers.sort_index（useDragSort 已做），还要把每个
+  // 已启动档案的成员顺序同步成新的卡片位置顺序。用户明确要求「档案成员排序」随卡片
+  // 移动更新。一个 provider 可能属于多个档案，每个档案独立按新全局顺序重排各自成员。
+  const handleDragEndWithProfileReorder = useCallback(
+    async (event: Parameters<typeof handleDragEnd>[0]) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) {
+        // 无实际移动：仍交给原始 handler（它会 no-op 返回）
+        return handleDragEnd(event);
+      }
+      // 先记下拖动前的全局顺序，原始 handler 成功后再据新顺序重排档案成员。
+      await handleDragEnd(event);
+
+      // handleDragEnd 内部已 invalidate providers/failoverQueue；这里基于拖动后的
+      // sortedProviders 推算新顺序。sortedProviders 是 useMemo，此刻仍指向旧顺序，
+      // 但 arrayMove 的结果与「按 active→over 移动后」一致，可直接用 event 推算：
+      // 用闭包里的 sortedProviders（旧序）做 arrayMove 得到新序，与后端写入一致。
+      const oldIndex = sortedProviders.findIndex((p) => p.id === active.id);
+      const newIndex = sortedProviders.findIndex((p) => p.id === over.id);
+      if (oldIndex === -1 || newIndex === -1) return;
+      const reordered = arrayMove(sortedProviders, oldIndex, newIndex);
+      const newGlobalOrder = reordered.map((p) => p.id);
+
+      // 对每个已启动档案：把它的成员按新全局顺序重排。
+      const startedProfileIdxs = orderedNamedProfiles
+        .map((p, i) => ({ p, i }))
+        .filter(({ p }) => !!p.port);
+      for (const { p, i } of startedProfileIdxs) {
+        const members = namedProfileMembers[i];
+        if (!members || members.length === 0) continue;
+        const memberIdSet = new Set(members.map((m) => m.providerId));
+        const orderedIds = newGlobalOrder.filter((id) => memberIdSet.has(id));
+        // 过滤后长度可能小于原成员数（成员不在当前 providers 列表里，如被过滤的）；
+        // 只在集合完全一致时重排，避免误删成员。
+        if (orderedIds.length !== members.length) continue;
+        // 与原顺序相同则跳过，省一次写。
+        const originalIds = members.map((m) => m.providerId);
+        if (orderedIds.every((id, idx) => id === originalIds[idx])) continue;
+        try {
+          await reorderProfileMembers.mutateAsync({
+            appType: appId,
+            profileId: p.profileId,
+            orderedProviderIds: orderedIds,
+          });
+        } catch (e) {
+          // 档案重排失败不影响全局排序的成功；只是 toast 提示。
+          console.error("Failed to reorder profile members after drag", e);
+          toast.error(
+            t("failover.profileReorderFailed", {
+              defaultValue: "档案成员排序更新失败",
+            }),
+          );
+        }
+      }
+    },
+    [
+      handleDragEnd,
+      sortedProviders,
+      orderedNamedProfiles,
+      namedProfileMembers,
+      reorderProfileMembers,
+      appId,
+      t,
+    ],
+  );
 
   const getFailoverPriority = useCallback(
     (providerId: string): number | undefined => {
@@ -1355,7 +1454,7 @@ export function ProviderList({
           return;
         }
 
-        handleDragEnd(event);
+        handleDragEndWithProfileReorder(event);
         return;
       }
 
@@ -1404,7 +1503,7 @@ export function ProviderList({
       allProviderListItems,
       assignProvidersToExistingGroup,
       clearProviderGroupDragState,
-      handleDragEnd,
+      handleDragEndWithProfileReorder,
       providerGroups,
       refreshProviderViews,
       reorderUngroupedProviderAroundGroup,
@@ -1748,6 +1847,9 @@ export function ProviderList({
         onAddToNamedProfile={(profileId) =>
           handleAddToNamedProfile(provider.id, profileId)
         }
+        onRemoveFromNamedProfile={(profileId) =>
+          handleRemoveFromNamedProfile(provider.id, profileId)
+        }
         activeProviderId={activeProviderId}
         isDefaultModel={
           appId === "hermes"
@@ -2070,6 +2172,7 @@ interface SortableProviderCardProps {
   onToggleFailover: (enabled: boolean) => void;
   namedFailoverProfiles?: { profileId: string; name: string }[];
   onAddToNamedProfile?: (profileId: string) => void;
+  onRemoveFromNamedProfile?: (profileId: string) => void;
   activeProviderId?: string;
   // OpenClaw: default model
   isDefaultModel?: boolean;
@@ -2429,6 +2532,7 @@ function SortableProviderCard({
   onToggleFailover,
   namedFailoverProfiles,
   onAddToNamedProfile,
+  onRemoveFromNamedProfile,
   activeProviderId,
   isDefaultModel,
   onSetAsDefault,
@@ -2554,6 +2658,7 @@ function SortableProviderCard({
           onToggleFailover={onToggleFailover}
           namedFailoverProfiles={namedFailoverProfiles}
           onAddToNamedProfile={onAddToNamedProfile}
+          onRemoveFromNamedProfile={onRemoveFromNamedProfile}
           activeProviderId={activeProviderId}
           // OpenClaw: default model
           isDefaultModel={isDefaultModel}

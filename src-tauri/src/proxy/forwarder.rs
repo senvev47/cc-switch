@@ -157,6 +157,12 @@ pub struct RequestForwarder {
     /// 档案成员链，故障转移重试也仅在该链内进行。全局「当前供应商」只对主端口有意义，
     /// 档案端口不应回写它，也不应触发 live 配置重写。
     is_profile_port: bool,
+    /// 当前请求归属的档案 id（仅 `is_profile_port == true` 时为 `Some`）。
+    ///
+    /// 用于构造档案专属的熔断器 key（`app_type:profile_id:provider_id`），使档案端口的
+    /// 熔断/健康统计与主端口及其它档案隔离。`None` 时熔断器 key 退化为共享
+    /// `app_type:provider_id`（主端口 / 共享队列 / 主端口会话路由路径）。
+    profile_id: Option<String>,
 }
 
 impl RequestForwarder {
@@ -225,6 +231,7 @@ impl RequestForwarder {
         copilot_optimizer_config: CopilotOptimizerConfig,
         max_retries: u32,
         is_profile_port: bool,
+        profile_id: Option<String>,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
         // saturating_add 防止 u32::MAX + 1 溢出。
@@ -249,6 +256,7 @@ impl RequestForwarder {
             ),
             max_attempts,
             is_profile_port,
+            profile_id,
         }
     }
 
@@ -258,10 +266,11 @@ impl RequestForwarder {
         app_type: &str,
         used_half_open_permit: bool,
     ) {
+        let profile_id = self.profile_id.as_deref();
         if used_half_open_permit {
             if let Err(e) = self
                 .router
-                .record_result(provider_id, app_type, true, true, None)
+                .record_result(provider_id, app_type, true, true, None, profile_id)
                 .await
             {
                 log::warn!(
@@ -274,9 +283,10 @@ impl RequestForwarder {
         let router = self.router.clone();
         let provider_id = provider_id.to_string();
         let app_type = app_type.to_string();
+        let profile_id = self.profile_id.clone();
         tokio::spawn(async move {
             if let Err(e) = router
-                .record_result(&provider_id, &app_type, false, true, None)
+                .record_result(&provider_id, &app_type, false, true, None, profile_id.as_deref())
                 .await
             {
                 log::warn!(
@@ -323,6 +333,7 @@ impl RequestForwarder {
                     used_half_open_permit,
                     false,
                     Some(retry_err.to_string()),
+                    self.profile_id.as_deref(),
                 )
                 .await;
             {
@@ -338,7 +349,12 @@ impl RequestForwarder {
         }
 
         self.router
-            .release_permit_neutral(&provider.id, app_type_str, used_half_open_permit)
+            .release_permit_neutral(
+                &provider.id,
+                app_type_str,
+                used_half_open_permit,
+                self.profile_id.as_deref(),
+            )
             .await;
         let mut status = self.status.write().await;
         status.failed_requests += 1;
@@ -459,7 +475,7 @@ impl RequestForwarder {
             } else {
                 let permit = self
                     .router
-                    .allow_provider_request(&provider.id, app_type_str)
+                    .allow_provider_request(&provider.id, app_type_str, self.profile_id.as_deref())
                     .await;
                 (permit.allowed, permit.used_half_open_permit)
             };
@@ -712,6 +728,7 @@ impl RequestForwarder {
                                         &provider.id,
                                         app_type_str,
                                         used_half_open_permit,
+                                        self.profile_id.as_deref(),
                                     )
                                     .await;
                                 let mut status = self.status.write().await;
@@ -867,6 +884,7 @@ impl RequestForwarder {
                                         &provider.id,
                                         app_type_str,
                                         used_half_open_permit,
+                                        self.profile_id.as_deref(),
                                     )
                                     .await;
                                 let mut status = self.status.write().await;
@@ -893,6 +911,7 @@ impl RequestForwarder {
                                         &provider.id,
                                         app_type_str,
                                         used_half_open_permit,
+                                        self.profile_id.as_deref(),
                                     )
                                     .await;
                                 let mut status = self.status.write().await;
@@ -1018,6 +1037,7 @@ impl RequestForwarder {
                                 &provider.id,
                                 app_type_str,
                                 used_half_open_permit,
+                                self.profile_id.as_deref(),
                             )
                             .await;
                         let mut status = self.status.write().await;
@@ -1051,6 +1071,7 @@ impl RequestForwarder {
                                     used_half_open_permit,
                                     false,
                                     Some(e.to_string()),
+                                    self.profile_id.as_deref(),
                                 )
                                 .await;
 
@@ -1080,6 +1101,7 @@ impl RequestForwarder {
                                     &provider.id,
                                     app_type_str,
                                     used_half_open_permit,
+                                    self.profile_id.as_deref(),
                                 )
                                 .await;
                             {
@@ -4072,6 +4094,7 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
             is_profile_port: false,
+            profile_id: None,
         }
     }
 

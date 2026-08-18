@@ -3551,12 +3551,13 @@ impl ProxyService {
         &self,
         provider_id: &str,
         app_type: &str,
+        profile_id: Option<&str>,
     ) -> Result<(), String> {
         if let Some(server) = self.server.read().await.as_ref() {
             server
-                .reset_provider_circuit_breaker(provider_id, app_type)
+                .reset_provider_circuit_breaker(provider_id, app_type, profile_id)
                 .await;
-            log::info!("已重置 Provider {provider_id} (app: {app_type}) 的熔断器");
+            log::info!("已重置 Provider {provider_id} (app: {app_type}, profile: {profile_id:?}) 的熔断器");
         }
         Ok(())
     }

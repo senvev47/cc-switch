@@ -180,9 +180,10 @@ impl ProviderRouter {
     /// 用户通过 `next_new_terminal_profile_id` 预设「下一个新终端」绑定到哪个档案，
     /// 消费后立即清回 None（一次性预设）。
     ///
-    /// 关键不变量：路由只改变起点/档案归属，**不改变** provider 集合，也**不改变**
-    /// 熔断器 key（始终为 `app_type:provider_id`），因此熔断器状态、健康统计、
-    /// 故障转移语义与 `select_providers` 完全一致。
+    /// 关键不变量：路由只改变起点/档案归属，**不改变** provider 集合；主端口路径的
+    /// 熔断器 key 仍为 `app_type:provider_id`（与 `select_providers` 共享，零回归）。
+    /// 档案端口专属的 3 段 key（`app_type:profile_id:provider_id`）只在
+    /// `select_providers_for_explicit_profile` 里使用。
     pub async fn select_providers_for_session(
         &self,
         app_type: &str,
@@ -268,7 +269,7 @@ impl ProviderRouter {
                 queue_len
             );
             return self
-                .rotate_providers(app_type, ordered_ids, &all_providers, off, queue_len)
+                .rotate_providers(app_type, ordered_ids, &all_providers, off, queue_len, None)
                 .await;
         }
 
@@ -316,7 +317,7 @@ impl ProviderRouter {
             queue_len
         );
 
-        self.rotate_providers(app_type, ordered_ids, &all_providers, new_offset, queue_len)
+        self.rotate_providers(app_type, ordered_ids, &all_providers, new_offset, queue_len, None)
             .await
     }
 
@@ -325,8 +326,9 @@ impl ProviderRouter {
     /// 仅当该应用存在命名档案时被 `select_providers_for_session` 调用。每个会话
     /// 绑定到一个档案 id：命中已有绑定且档案仍存在则复用；否则按用户为**该 app**
     /// 预设的档案派发（无预设 = 默认共享队列）。档案成员序列实时从 DB 读取（始终
-    /// 最新，无需版本字段）；档案被删除或成员变空时重新派发。熔断器 key 仍为
-    /// `app_type:provider_id`，与全局路径一致。
+    /// 最新，无需版本字段）；档案被删除或成员变空时重新派发。主端口路径的熔断器
+    /// key 仍为 `app_type:provider_id`，与全局路径一致（档案端口隔离在
+    /// `select_providers_for_explicit_profile` 单独实现）。
     ///
     /// **持久保留语义**（用户要求）：预设**不**在新终端绑定时清空——它一直保留，
     /// 每个新开终端都绑定到该档案，直到用户在前端手动改成另一个档案或「默认共享
@@ -389,8 +391,11 @@ impl ProviderRouter {
                 ordered_ids.len()
             );
             let qlen = ordered_ids.len();
+            // 主端口会话路由经命名档案成员列表路由，但仍是主端口流量（非档案端口 server），
+            // 熔断器 key 保持 `app_type:provider_id`，与共享队列一致。命名档案的端口
+            // 隔离只在 `select_providers_for_explicit_profile` 里生效。
             return self
-                .rotate_providers(app_type, ordered_ids, &all_providers, 0, qlen)
+                .rotate_providers(app_type, ordered_ids, &all_providers, 0, qlen, None)
                 .await;
         }
 
@@ -432,8 +437,9 @@ impl ProviderRouter {
     ///   - **不读写** `session_routes`：无需绑定表，也就不涉及 TTL / 容量驱逐；
     ///   - **不读** `next_new_terminal_profile_id` 预设。
     ///
-    /// 仍与全局路径共享熔断器 key（`app_type:provider_id`，见 `rotate_providers`），
-    /// 故熔断状态与健康统计不会因档案而分裂。
+    /// 仍与全局路径共享熔断器 key 的前缀（`app_type:`），但本函数经 `rotate_providers`
+    /// 追加 `profile_id` 维度，实际 key = `app_type:profile_id:provider_id`，
+    /// 故档案端口的熔断状态与健康统计按档案隔离，不影响主端口或其它档案。
     ///
     /// 自动故障转移开关（门 2）此处**不影响 provider 选择**，但仍实质生效于重试：
     /// 关闭时 `RequestContext::create_forwarder` 会强制 `max_retries = 0`，档案链只会
@@ -467,14 +473,20 @@ impl ProviderRouter {
         log::info!(
             "[{app_type}] 档案端点：/p/{profile_id} (members={queue_len})"
         );
-        self.rotate_providers(app_type, ordered_ids, &all_providers, 0, queue_len)
+        self.rotate_providers(app_type, ordered_ids, &all_providers, 0, queue_len, Some(profile_id))
             .await
     }
 
-    /// 按 offset 轮转 `ordered_ids`，再走与 `select_providers` 完全一致的熔断器过滤。
+    /// 按 offset 轮转 `ordered_ids`，再走与 `select_providers` 一致的熔断器过滤。
     ///
     /// 抽出此 helper 是因为「命中已有绑定复用 offset」与「首次派发新 offset」两条路径
     /// 后续的轮转 + 熔断过滤逻辑完全相同，集中到一处避免分叉。
+    ///
+    /// 熔断器 key 随 `profile_id` 分维度：
+    /// - `None`：主端口 / 共享队列 / 主端口会话路由，key = `app_type:provider_id`
+    ///   （与 `select_providers` 共享，既有行为，零回归）；
+    /// - `Some(pid)`：档案端口专属，key = `app_type:profile_id:provider_id`，
+    ///   档案端口把某 provider 打熔断不会影响主端口或其它档案对同一 provider 的使用。
     async fn rotate_providers(
         &self,
         app_type: &str,
@@ -482,6 +494,7 @@ impl ProviderRouter {
         all_providers: &IndexMap<String, Provider>,
         offset: usize,
         queue_len: usize,
+        profile_id: Option<&str>,
     ) -> Result<Vec<Provider>, AppError> {
         let rotated: Vec<String> = (0..queue_len)
             .map(|i| ordered_ids[(i + offset) % queue_len].clone())
@@ -494,7 +507,10 @@ impl ProviderRouter {
             let Some(provider) = all_providers.get(provider_id).cloned() else {
                 continue;
             };
-            let circuit_key = format!("{app_type}:{}", provider.id);
+            let circuit_key = match profile_id {
+                Some(pid) => format!("{app_type}:{pid}:{}", provider.id),
+                None => format!("{app_type}:{}", provider.id),
+            };
             let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
             if breaker.is_available().await {
                 result.push(provider);
@@ -537,8 +553,16 @@ impl ProviderRouter {
     ///
     /// 注意：调用方必须在请求结束后通过 `record_result()` 释放 HalfOpen 名额，
     /// 否则会导致该 Provider 长时间无法进入探测状态。
-    pub async fn allow_provider_request(&self, provider_id: &str, app_type: &str) -> AllowResult {
-        let circuit_key = format!("{app_type}:{provider_id}");
+    pub async fn allow_provider_request(
+        &self,
+        provider_id: &str,
+        app_type: &str,
+        profile_id: Option<&str>,
+    ) -> AllowResult {
+        let circuit_key = match profile_id {
+            Some(pid) => format!("{app_type}:{pid}:{provider_id}"),
+            None => format!("{app_type}:{provider_id}"),
+        };
         let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
         breaker.allow_request().await
     }
@@ -551,6 +575,7 @@ impl ProviderRouter {
         used_half_open_permit: bool,
         success: bool,
         error_msg: Option<String>,
+        profile_id: Option<&str>,
     ) -> Result<(), AppError> {
         // 1. 按应用独立获取熔断器配置
         let failure_threshold = match self.db.get_proxy_config_for_app(app_type).await {
@@ -559,7 +584,10 @@ impl ProviderRouter {
         };
 
         // 2. 更新熔断器状态
-        let circuit_key = format!("{app_type}:{provider_id}");
+        let circuit_key = match profile_id {
+            Some(pid) => format!("{app_type}:{pid}:{provider_id}"),
+            None => format!("{app_type}:{provider_id}"),
+        };
         let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
 
         if success {
@@ -591,8 +619,21 @@ impl ProviderRouter {
     }
 
     /// 重置指定供应商的熔断器
-    pub async fn reset_provider_breaker(&self, provider_id: &str, app_type: &str) {
-        let circuit_key = format!("{app_type}:{provider_id}");
+    ///
+    /// 注意：现有 UI 重置命令（`reset_circuit_breaker`）不传 `profile_id`，
+    /// 因此只能重置主端口共享 key 的熔断器；档案端口专属 key 触发的熔断
+    /// 依赖其 `timeout_seconds` 自恢复。如需支持手动重置档案熔断器，
+    /// 命令需新增 `profile_id` 参数并由前端传档案上下文。
+    pub async fn reset_provider_breaker(
+        &self,
+        provider_id: &str,
+        app_type: &str,
+        profile_id: Option<&str>,
+    ) {
+        let circuit_key = match profile_id {
+            Some(pid) => format!("{app_type}:{pid}:{provider_id}"),
+            None => format!("{app_type}:{provider_id}"),
+        };
         self.reset_circuit_breaker(&circuit_key).await;
     }
 
@@ -605,11 +646,15 @@ impl ProviderRouter {
         provider_id: &str,
         app_type: &str,
         used_half_open_permit: bool,
+        profile_id: Option<&str>,
     ) {
         if !used_half_open_permit {
             return;
         }
-        let circuit_key = format!("{app_type}:{provider_id}");
+        let circuit_key = match profile_id {
+            Some(pid) => format!("{app_type}:{pid}:{provider_id}"),
+            None => format!("{app_type}:{provider_id}"),
+        };
         let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
         breaker.release_half_open_permit();
     }
@@ -639,8 +684,12 @@ impl ProviderRouter {
         &self,
         provider_id: &str,
         app_type: &str,
+        profile_id: Option<&str>,
     ) -> Option<crate::proxy::circuit_breaker::CircuitBreakerStats> {
-        let circuit_key = format!("{app_type}:{provider_id}");
+        let circuit_key = match profile_id {
+            Some(pid) => format!("{app_type}:{pid}:{provider_id}"),
+            None => format!("{app_type}:{provider_id}"),
+        };
         let breakers = self.circuit_breakers.read().await;
 
         if let Some(breaker) = breakers.get(&circuit_key) {
@@ -879,14 +928,14 @@ mod tests {
         let router = ProviderRouter::new(db.clone());
 
         router
-            .record_result("b", "claude", false, false, Some("fail".to_string()))
+            .record_result("b", "claude", false, false, Some("fail".to_string()), None)
             .await
             .unwrap();
 
         let providers = router.select_providers("claude").await.unwrap();
         assert_eq!(providers.len(), 2);
 
-        assert!(router.allow_provider_request("b", "claude").await.allowed);
+        assert!(router.allow_provider_request("b", "claude", None).await.allowed);
     }
 
     #[tokio::test]
@@ -918,26 +967,26 @@ mod tests {
 
         // 触发熔断：1 次失败
         router
-            .record_result("a", "claude", false, false, Some("fail".to_string()))
+            .record_result("a", "claude", false, false, Some("fail".to_string()), None)
             .await
             .unwrap();
 
         // 第一次请求：获取 HalfOpen 探测名额
-        let first = router.allow_provider_request("a", "claude").await;
+        let first = router.allow_provider_request("a", "claude", None).await;
         assert!(first.allowed);
         assert!(first.used_half_open_permit);
 
         // 第二次请求应被拒绝（名额已被占用）
-        let second = router.allow_provider_request("a", "claude").await;
+        let second = router.allow_provider_request("a", "claude", None).await;
         assert!(!second.allowed);
 
         // 使用 release_permit_neutral 释放名额（不影响健康统计）
         router
-            .release_permit_neutral("a", "claude", first.used_half_open_permit)
+            .release_permit_neutral("a", "claude", first.used_half_open_permit, None)
             .await;
 
         // 第三次请求应被允许（名额已释放）
-        let third = router.allow_provider_request("a", "claude").await;
+        let third = router.allow_provider_request("a", "claude", None).await;
         assert!(third.allowed);
         assert!(third.used_half_open_permit);
     }

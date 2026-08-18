@@ -32,9 +32,10 @@ use super::{
         transform_codex_responses_namespace, transform_gemini, transform_responses,
     },
     response_processor::{
-        create_logged_passthrough_stream, create_usage_collector, process_response,
-        read_decoded_body, strip_entity_headers_for_rebuilt_body,
-        strip_hop_by_hop_response_headers, usage_logging_enabled, SseUsageCollector,
+        build_deferred_breaker_failure, create_logged_passthrough_stream,
+        create_usage_collector, process_response, read_decoded_body,
+        strip_entity_headers_for_rebuilt_body, strip_hop_by_hop_response_headers,
+        usage_logging_enabled, SseUsageCollector,
     },
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
@@ -641,12 +642,15 @@ async fn handle_claude_transform(
         // 获取流式超时配置
         let timeout_config = ctx.streaming_timeout_config();
 
+        let deferred_breaker_failure = build_deferred_breaker_failure(ctx, state);
+
         let logged_stream = create_logged_passthrough_stream(
             sse_stream,
             "Claude/OpenRouter",
             usage_collector,
             timeout_config,
             connection_guard,
+            deferred_breaker_failure,
         );
 
         let mut headers = axum::http::HeaderMap::new();
@@ -1249,6 +1253,7 @@ async fn handle_codex_responses_namespace_restore(
             usage_collector,
             ctx.streaming_timeout_config(),
             connection_guard,
+            build_deferred_breaker_failure(ctx, state),
         );
 
         let body = axum::body::Body::from_stream(logged_stream);
@@ -1442,6 +1447,7 @@ async fn handle_codex_chat_to_responses_transform(
             usage_collector,
             ctx.streaming_timeout_config(),
             connection_guard,
+            build_deferred_breaker_failure(ctx, state),
         );
 
         let mut headers = axum::http::HeaderMap::new();
@@ -1815,6 +1821,7 @@ fn build_codex_anthropic_sse_response(
         usage_collector,
         ctx.streaming_timeout_config(),
         connection_guard,
+        build_deferred_breaker_failure(ctx, state),
     );
 
     let mut headers = axum::http::HeaderMap::new();

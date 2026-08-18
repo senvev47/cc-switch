@@ -341,7 +341,7 @@ pub async fn reset_circuit_breaker(
     // 2. 如果代理正在运行，重置内存中的熔断器状态
     state
         .proxy_service
-        .reset_provider_circuit_breaker(&provider_id, &app_type)
+        .reset_provider_circuit_breaker(&provider_id, &app_type, None)
         .await?;
 
     // 3. 检查是否应该切回优先级更高的供应商（从 proxy_config 表读取）

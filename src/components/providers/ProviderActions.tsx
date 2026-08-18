@@ -6,6 +6,7 @@ import {
   Copy,
   Edit,
   Loader2,
+  LogOut,
   Minus,
   Play,
   Plus,
@@ -57,6 +58,10 @@ interface ProviderActionsProps {
   namedFailoverProfiles?: { profileId: string; name: string }[];
   /** 将本 provider 加入命名档案。 */
   onAddToNamedProfile?: (profileId: string) => void;
+  /** 将本 provider 从命名档案移除（退出档案）。 */
+  onRemoveFromNamedProfile?: (profileId: string) => void;
+  /** 该 provider 所属的命名档案徽章（用于「退出档案」下拉列出可退出的档案）。 */
+  profileBadges?: { profileId: string; profileName: string }[];
   isOfficialBlockedByProxy?: boolean;
   // Hermes v12+ providers: dict overlay — edit/delete must go through Web UI
   isReadOnly?: boolean;
@@ -102,6 +107,8 @@ export function ProviderActions({
   onToggleFailover,
   namedFailoverProfiles = [],
   onAddToNamedProfile,
+  onRemoveFromNamedProfile,
+  profileBadges = [],
   isOfficialBlockedByProxy = false,
   isReadOnly = false,
   // OpenClaw: default model
@@ -401,6 +408,34 @@ export function ProviderActions({
           </Button>
         )}
       </span>
+
+      {profileBadges.length > 0 && onRemoveFromNamedProfile && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              size="icon"
+              variant="ghost"
+              title={t("failover.exitProfile", { defaultValue: "退出档案" })}
+              className={iconButtonClass}
+            >
+              <LogOut className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-56">
+            <DropdownMenuLabel>
+              {t("failover.exitWhichProfile", { defaultValue: "退出哪个档案" })}
+            </DropdownMenuLabel>
+            {profileBadges.map((p) => (
+              <DropdownMenuItem
+                key={p.profileId}
+                onClick={() => onRemoveFromNamedProfile(p.profileId)}
+              >
+                {p.profileName}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
 
       <div className="flex items-center gap-1">
         <Button

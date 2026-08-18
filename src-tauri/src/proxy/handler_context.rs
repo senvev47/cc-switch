@@ -253,6 +253,17 @@ impl RequestContext {
         // 不调 hot_switch_provider 重写全局 live 配置），避免污染其它档案终端。
         let is_profile_port = state.profile_binding.is_some();
 
+        // 档案端口的熔断器 key 带 profile 维度（`app_type:profile_id:provider_id`），
+        // 与主端口共享 key（`app_type:provider_id`）隔离。绑定档案的 app_type 必须与
+        // 请求的 app_type 一致——否则视为无绑定（防御性，端口按 (app_type, profile_id)
+        // 分配，不会跨 app）。
+        let profile_id = state
+            .profile_binding
+            .as_ref()
+            .as_ref()
+            .filter(|(app, _)| *app == self.app_type_str)
+            .map(|(_, pid)| pid.clone());
+
         RequestForwarder::new(
             state.provider_router.clone(),
             non_streaming_timeout,
@@ -272,6 +283,7 @@ impl RequestContext {
             self.copilot_optimizer_config.clone(),
             max_retries,
             is_profile_port,
+            profile_id,
         )
     }
 

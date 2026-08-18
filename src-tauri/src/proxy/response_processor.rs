@@ -8,6 +8,7 @@ use super::{
     handler_config::{StreamUsageEventFilter, UsageParserConfig},
     handler_context::{RequestContext, StreamingTimeoutConfig},
     hyper_client::{ProxyResponse, MAX_RESPONSE_BODY_BYTES},
+    provider_router::ProviderRouter,
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
     usage::parser::TokenUsage,
@@ -190,6 +191,9 @@ pub async fn handle_streaming(
     // 获取流式超时配置
     let timeout_config = ctx.streaming_timeout_config();
 
+    // 构造延后熔断器失败上下文（故障转移开启时才需要）
+    let deferred_breaker_failure = build_deferred_breaker_failure(ctx, state);
+
     // 创建带日志和超时的透传流
     let logged_stream = create_logged_passthrough_stream(
         stream,
@@ -197,6 +201,7 @@ pub async fn handle_streaming(
         usage_collector,
         timeout_config,
         connection_guard,
+        deferred_breaker_failure,
     );
 
     let body = axum::body::Body::from_stream(logged_stream);
@@ -679,6 +684,82 @@ async fn log_usage_internal(
     }
 }
 
+/// 流式响应中途失败时延后记录的熔断器失败上下文。
+///
+/// forwarder 在首字节到达时就调 `record_result(success=true)`，但流式 body 在之后
+/// 才被消费——中途断流（`error reading a body from connection`）或流式超时发生在
+/// success 已记录之后，熔断器永远看不到这次失败，导致坏 provider 一直被复用。
+///
+/// 本结构持有记录一次失败所需的全部上下文（`Arc<ProviderRouter>` + provider/app/profile
+/// 标识），在流式 body 读取出错或超时时经 `tokio::spawn` 异步记一笔失败：
+/// - `used_half_open_permit = false`：forwarder 已在 success 路径释放过 permit，
+///   这里不能再释放，否则 double-release；
+/// - `success = false`：作为失败计入熔断器（`record_success` 已把 `consecutive_failures`
+///   清零，这次失败从 0 起递增，即「首字节成功 → 中途断流」净记 1 次失败，正确）。
+///
+/// `None` 表示不需要延后记录（故障转移关闭 / 非 profile 端口且 failover 关闭等场景）。
+#[derive(Clone)]
+pub struct DeferredBreakerFailure {
+    pub router: Arc<ProviderRouter>,
+    pub provider_id: String,
+    pub app_type: String,
+    pub profile_id: Option<String>,
+}
+
+impl DeferredBreakerFailure {
+    /// 异步记一次熔断器失败。失败本身不应阻塞把错误 yield 给客户端。
+    pub fn record_spawn(self, error_msg: String) {
+        let router = self.router.clone();
+        let provider_id = self.provider_id.clone();
+        let app_type = self.app_type.clone();
+        let profile_id = self.profile_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = router
+                .record_result(
+                    &provider_id,
+                    &app_type,
+                    false, // used_half_open_permit
+                    false, // success = failure
+                    Some(error_msg),
+                    profile_id.as_deref(),
+                )
+                .await
+            {
+                log::warn!(
+                    "[{app_type}] 流式延后记录 Provider 失败失败: provider_id={provider_id}, error={e}"
+                );
+            }
+        });
+    }
+}
+
+/// 为当前请求构造延后熔断器失败上下文。
+///
+/// 仅当故障转移开启时需要：关闭时 forwarder 会 `bypass_circuit_breaker`，流式中途失败
+/// 也没有下家可切，记录只会污染健康统计而无路由收益。`profile_id` 由 `state.profile_binding`
+/// 按 app 过滤得出——与 `handler_context::create_forwarder` 同口径，保证与 forwarder
+/// 首字节成功路径用的是同一个熔断器 key。
+pub fn build_deferred_breaker_failure(
+    ctx: &RequestContext,
+    state: &ProxyState,
+) -> Option<DeferredBreakerFailure> {
+    if !ctx.app_config.auto_failover_enabled {
+        return None;
+    }
+    let profile_id = state
+        .profile_binding
+        .as_ref()
+        .as_ref()
+        .filter(|(app, _)| *app == ctx.app_type_str)
+        .map(|(_, pid)| pid.clone());
+    Some(DeferredBreakerFailure {
+        router: state.provider_router.clone(),
+        provider_id: ctx.provider.id.clone(),
+        app_type: ctx.app_type_str.to_string(),
+        profile_id,
+    })
+}
+
 /// 创建带日志记录和超时控制的透传流
 pub fn create_logged_passthrough_stream(
     stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
@@ -686,6 +767,7 @@ pub fn create_logged_passthrough_stream(
     usage_collector: Option<SseUsageCollector>,
     timeout_config: StreamingTimeoutConfig,
     connection_guard: Option<ActiveConnectionGuard>,
+    deferred_breaker_failure: Option<DeferredBreakerFailure>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let _conn_guard = connection_guard;
@@ -696,6 +778,7 @@ pub fn create_logged_passthrough_stream(
         let inspect_sse_events =
             collector.is_some() || log::log_enabled!(log::Level::Debug);
         let mut is_first_chunk = true;
+        let mut deferred = deferred_breaker_failure;
 
         // 超时配置
         let first_byte_timeout = if timeout_config.first_byte_timeout > 0 {
@@ -728,6 +811,9 @@ pub fn create_logged_passthrough_stream(
                             // 超时
                             let timeout_type = if is_first_chunk { "首字节" } else { "静默期" };
                             log::error!("[{tag}] 流式响应{}超时 ({}秒)", timeout_type, duration.as_secs());
+                            if let Some(d) = deferred.take() {
+                                d.record_spawn(format!("流式响应{timeout_type}超时"));
+                            }
                             yield Err(std::io::Error::other(format!("流式响应{timeout_type}超时")));
                             break;
                         }
@@ -784,6 +870,9 @@ pub fn create_logged_passthrough_stream(
                 }
                 Some(Err(e)) => {
                     log::error!("[{tag}] 流错误: {e}");
+                    if let Some(d) = deferred.take() {
+                        d.record_spawn(format!("流式响应中断: {e}"));
+                    }
                     yield Err(std::io::Error::other(e.to_string()));
                     break;
                 }
