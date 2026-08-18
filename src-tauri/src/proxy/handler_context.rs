@@ -248,6 +248,11 @@ impl RequestContext {
             0
         };
 
+        // 是否档案端口：`profile_binding` 存在即本端口绑定了一个命名档案（档案即端口）。
+        // 档案端口的转发器在故障转移成功时**不触发全局副作用**（不写 current_providers、
+        // 不调 hot_switch_provider 重写全局 live 配置），避免污染其它档案终端。
+        let is_profile_port = state.profile_binding.is_some();
+
         RequestForwarder::new(
             state.provider_router.clone(),
             non_streaming_timeout,
@@ -266,6 +271,7 @@ impl RequestContext {
             self.optimizer_config.clone(),
             self.copilot_optimizer_config.clone(),
             max_retries,
+            is_profile_port,
         )
     }
 

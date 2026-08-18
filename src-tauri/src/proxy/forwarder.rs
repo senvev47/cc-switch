@@ -146,6 +146,17 @@ pub struct RequestForwarder {
     /// `max_attempts = max_retries + 1`，所以 max_retries=0 表示仅尝试一家、
     /// max_retries=3（默认）表示最多 4 家。loop 同时受 providers.len() 自然限制。
     max_attempts: usize,
+    /// 本转发器是否服务于「档案即端口」的专属端口 server。
+    ///
+    /// `true` 时，故障转移成功**不触发全局副作用**：不写 `current_providers` 共享表、
+    /// 不调用 `failover_manager.try_switch`（后者会 `hot_switch_provider` → 重写全局
+    /// `~/.claude/settings.json`，把 `ANTHROPIC_BASE_URL` 指回主端口，污染所有终端——
+    /// 这是「开启故障转移后两个档案互相冲突、终端 Connection lost」的根因）。
+    ///
+    /// 档案端口的路由是隔离的：只走 `select_providers_for_explicit_profile` 选出的
+    /// 档案成员链，故障转移重试也仅在该链内进行。全局「当前供应商」只对主端口有意义，
+    /// 档案端口不应回写它，也不应触发 live 配置重写。
+    is_profile_port: bool,
 }
 
 impl RequestForwarder {
@@ -213,6 +224,7 @@ impl RequestForwarder {
         optimizer_config: OptimizerConfig,
         copilot_optimizer_config: CopilotOptimizerConfig,
         max_retries: u32,
+        is_profile_port: bool,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
         // saturating_add 防止 u32::MAX + 1 溢出。
@@ -235,6 +247,10 @@ impl RequestForwarder {
             streaming_first_byte_timeout: std::time::Duration::from_secs(
                 streaming_first_byte_timeout,
             ),
+            max_attempts,
+            is_profile_port,
+        }
+    }
             max_attempts,
         }
     }
@@ -506,7 +522,10 @@ impl RequestForwarder {
                         .await;
 
                     // 更新当前应用类型使用的 provider
-                    {
+                    // 档案端口不走全局副作用：`current_providers` 是主端口「当前供应商」
+                    // 表，档案端口的路由由端口本身标识，写它只会让 UI 把另一档案的终端
+                    // 显示成「正在用某 provider」，并污染 live 配置重写链。
+                    if !self.is_profile_port {
                         let mut current_providers = self.current_providers.write().await;
                         current_providers.insert(
                             app_type_str.to_string(),
@@ -521,7 +540,7 @@ impl RequestForwarder {
                         status.last_error = None;
                         let should_switch =
                             self.current_provider_id_at_start.as_str() != provider.id.as_str();
-                        if should_switch {
+                        if should_switch && !self.is_profile_port {
                             status.failover_count += 1;
 
                             // 异步触发供应商切换，更新 UI/托盘，并把“当前供应商”同步为实际使用的 provider
@@ -610,7 +629,8 @@ impl RequestForwarder {
                                     )
                                     .await;
 
-                                    {
+                                    // 档案端口不走全局副作用（见首个成功分支注释）。
+                                    if !self.is_profile_port {
                                         let mut current_providers =
                                             self.current_providers.write().await;
                                         current_providers.insert(
@@ -626,7 +646,7 @@ impl RequestForwarder {
                                         let should_switch =
                                             self.current_provider_id_at_start.as_str()
                                                 != provider.id.as_str();
-                                        if should_switch {
+                                        if should_switch && !self.is_profile_port {
                                             status.failover_count += 1;
                                             let fm = self.failover_manager.clone();
                                             let ah = self.app_handle.clone();
@@ -757,7 +777,8 @@ impl RequestForwarder {
                                         .await;
 
                                         // 更新当前应用类型使用的 provider
-                                        {
+                                        // 档案端口不走全局副作用（见首个成功分支注释）。
+                                        if !self.is_profile_port {
                                             let mut current_providers =
                                                 self.current_providers.write().await;
                                             current_providers.insert(
@@ -774,7 +795,7 @@ impl RequestForwarder {
                                             let should_switch =
                                                 self.current_provider_id_at_start.as_str()
                                                     != provider.id.as_str();
-                                            if should_switch {
+                                            if should_switch && !self.is_profile_port {
                                                 status.failover_count += 1;
 
                                                 // 异步触发供应商切换，更新 UI/托盘
@@ -924,7 +945,8 @@ impl RequestForwarder {
                                     )
                                     .await;
 
-                                    {
+                                    // 档案端口不走全局副作用（见首个成功分支注释）。
+                                    if !self.is_profile_port {
                                         let mut current_providers =
                                             self.current_providers.write().await;
                                         current_providers.insert(
@@ -940,7 +962,7 @@ impl RequestForwarder {
                                         let should_switch =
                                             self.current_provider_id_at_start.as_str()
                                                 != provider.id.as_str();
-                                        if should_switch {
+                                        if should_switch && !self.is_profile_port {
                                             status.failover_count += 1;
                                             let fm = self.failover_manager.clone();
                                             let ah = self.app_handle.clone();
@@ -4052,6 +4074,7 @@ mod tests {
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
+            is_profile_port: false,
         }
     }
 

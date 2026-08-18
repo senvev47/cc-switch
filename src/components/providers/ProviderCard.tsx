@@ -334,24 +334,34 @@ export function ProviderCard({
       !isProxyTakeover &&
       (isActiveProvider || hasPersistentConfigHighlight));
 
-  // 「档案即颜色」：当供应商在某个命名档案中时，卡片边框 + 底色 染成该档案的配色
-  // （取首个档案，多档案时以主档案为准）。
+  // 「档案即颜色」：只给**正在使用**的供应商着色——即它作为某档案的 P1（首位成员）
+  // 时才染该档案的颜色（P2/P3 不染色，与「旧档案故障转发只高亮当前供应商」一致）。
   //
-  // 优先级**高于** active 的 emerald/blue：用户要求「当新档案路由在使用时，供应商
-  // 卡片要出现该档案的颜色，如同使用供应商一样把整个卡片都变成对应的颜色」——
-  // 即使该 provider 正是当前 active 项（绿/蓝），只要它归属某个命名档案，就以档案
-  // 配色为准。这样「档案 test 的 P1 = My Claude copy」在被 test 终端使用时，卡片
-  // 染成 test 的颜色，而非默认的绿色，用户一眼可见当前走的是哪个档案。
-  const hasProfile = (profileBadges?.length ?? 0) > 0;
+  // 当一个供应商同时是**两个**档案的 P1（两个终端档案共用同一张卡）时，卡片左右各染
+  // 一半，分别用两个档案的配色，一眼可见「这张卡同时被两个档案使用」。
+  //
+  // 优先级**高于** active 的 emerald/blue：档案配色生效时压制绿/蓝，避免颜色叠加。
+  const p1Badges = (profileBadges ?? []).filter((b) => b.priority === 1);
+  const hasProfile = p1Badges.length > 0;
+  // 单档案 P1：整卡染色；双档案 P1：左半 / 右半 各染一色。
   const profileBorderClass = hasProfile
-    ? getFailoverProfileBorderColorClass(profileBadges![0].colorIndex)
+    ? getFailoverProfileBorderColorClass(p1Badges[0].colorIndex)
     : "";
   const profileBgClass = hasProfile
-    ? getFailoverProfileBgColorClass(profileBadges![0].colorIndex)
+    ? getFailoverProfileBgColorClass(p1Badges[0].colorIndex)
     : "";
+  const profileBorderClass2 =
+    p1Badges.length > 1
+      ? getFailoverProfileBorderColorClass(p1Badges[1].colorIndex)
+      : "";
+  const profileBgClass2 =
+    p1Badges.length > 1
+      ? getFailoverProfileBgColorClass(p1Badges[1].colorIndex)
+      : "";
   // 当档案配色生效时，压制 active 的绿/蓝边框与底色，避免颜色叠加冲突。
   const effectiveGreen = shouldUseGreen && !hasProfile;
   const effectiveBlue = shouldUseBlue && !hasProfile;
+  const splitProfile = p1Badges.length > 1;
 
   return (
     <div
@@ -364,25 +374,48 @@ export function ProviderCard({
         effectiveGreen &&
           "border-emerald-500/60 shadow-sm shadow-emerald-500/10",
         effectiveBlue && "border-blue-500/60 shadow-sm shadow-blue-500/10",
-        profileBorderClass,
+        // 拆分场景下不染边框（半边色边框用 Tailwind 边框类难以稳定表达），
+        // 仅靠半宽底色区分两档案；单档案场景沿用单色边框类。
+        !splitProfile && profileBorderClass,
         !(isActiveProvider || hasPersistentConfigHighlight) &&
           "hover:shadow-sm",
         dragHandleProps?.isDragging &&
           "cursor-grabbing border-primary shadow-lg scale-105 z-10",
       )}
     >
-      <div
-        className={cn(
-          "absolute inset-0 bg-gradient-to-r to-transparent transition-opacity duration-500 pointer-events-none",
-          effectiveGreen && "from-emerald-500/10",
-          effectiveBlue && "from-blue-500/10",
-          hasProfile && profileBgClass,
-          !effectiveGreen && !effectiveBlue && !hasProfile && "from-primary/10",
-          isActiveProvider || hasPersistentConfigHighlight || hasProfile
-            ? "opacity-100"
-            : "opacity-0",
-        )}
-      />
+      {splitProfile ? (
+        // 两个档案同时以本卡为 P1：左右各占一半，分别渲染两个档案的配色。
+        // 用两个绝对定位的半宽渐变层叠加，避免单一 from-* 类无法表达「一半一色」。
+        <>
+          <div
+            className={cn(
+              "absolute inset-y-0 left-0 w-1/2 bg-gradient-to-r to-transparent transition-opacity duration-500 pointer-events-none",
+              profileBgClass,
+              "opacity-100",
+            )}
+          />
+          <div
+            className={cn(
+              "absolute inset-y-0 right-0 w-1/2 bg-gradient-to-l to-transparent transition-opacity duration-500 pointer-events-none",
+              profileBgClass2,
+              "opacity-100",
+            )}
+          />
+        </>
+      ) : (
+        <div
+          className={cn(
+            "absolute inset-0 bg-gradient-to-r to-transparent transition-opacity duration-500 pointer-events-none",
+            effectiveGreen && "from-emerald-500/10",
+            effectiveBlue && "from-blue-500/10",
+            hasProfile && profileBgClass,
+            !effectiveGreen && !effectiveBlue && !hasProfile && "from-primary/10",
+            isActiveProvider || hasPersistentConfigHighlight || hasProfile
+              ? "opacity-100"
+              : "opacity-0",
+          )}
+        />
+      )}
       <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <button
