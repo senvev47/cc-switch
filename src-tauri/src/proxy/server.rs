@@ -24,10 +24,108 @@ use axum::{
     Router,
 };
 use hyper_util::rt::TokioIo;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::TcpListener;
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinHandle;
+
+/// 绑定一个开启 `SO_REUSEADDR` 的 TCP 监听器，并在配置端口被占用时**自动回退**到
+/// 下一个可用端口。
+///
+/// 解决两类「路由打不开」问题：
+/// 1. **进程重叠 / TIME_WAIT**：app 重启时旧 socket 可能尚未完全释放，`bind` 返回
+///    10048 (WSAEADDRINUSE)。`SO_REUSEADDR` 允许在 TIME_WAIT 上重新绑定。
+/// 2. **端口被其它进程占用**：若配置端口被占用且无法复用，顺序探测
+///    `listen_port..=listen_port+200`，再退到 `0`（OS 分配）。不再因端口冲突让
+///    `恢复代理接管状态` 整条链失败、路由彻底打不开。
+///
+/// 注意：Windows 上 `SO_REUSEADDR` 语义比 POSIX 更宽松（允许多 socket 同时绑同一端口）。
+/// 这里仅用于跨重启/重叠的 TIME_WAIT 复用，不依赖其「多 socket 共享」语义。
+fn bind_listener_with_reuse_and_fallback(
+    listen_address: &str,
+    preferred_port: u16,
+) -> Result<(TcpListener, SocketAddr), ProxyError> {
+    // 解析一次地址族：127.0.0.1 / 0.0.0.0 → IPv4；[::] / ::1 → IPv6。
+    let probe: SocketAddr = format!("{listen_address}:0")
+        .parse()
+        .map_err(|e| ProxyError::BindFailed(format!("无效的监听地址 {listen_address}: {e}")))?;
+    let domain = if probe.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+
+    // 候选端口序列：优先配置端口，然后 +1..+200，最后 0（交给 OS）。
+    let mut candidates: Vec<u16> = Vec::with_capacity(202);
+    candidates.push(preferred_port);
+    for offset in 1u16..=200u16 {
+        candidates.push(preferred_port.saturating_add(offset));
+    }
+    candidates.push(0);
+
+    let mut last_err: Option<String> = None;
+    for port in candidates {
+        match bind_reuse_one(listen_address, port, domain) {
+            Ok((listener, addr)) => {
+                if port != preferred_port && port != 0 {
+                    log::warn!(
+                        "配置端口 {preferred_port} 被占用，已回退到空闲端口 {} ({listen_address})",
+                        addr.port()
+                    );
+                } else if port == 0 {
+                    log::warn!(
+                        "配置端口 {preferred_port} 及其后 200 个端口均被占用，由 OS 分配端口: {}",
+                        addr.port()
+                    );
+                }
+                return Ok((listener, addr));
+            }
+            Err(e) => {
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(ProxyError::BindFailed(format!(
+        "绑定 {listen_address}:{preferred_port} 失败（已尝试回退端口）: {}",
+        last_err.unwrap_or_else(|| "未知错误".to_string())
+    )))
+}
+
+/// 用 `socket2` 建一个带 `SO_REUSEADDR` 的监听 socket，bind + listen 后转交 tokio。
+fn bind_reuse_one(
+    listen_address: &str,
+    port: u16,
+    domain: Domain,
+) -> Result<(TcpListener, SocketAddr), ProxyError> {
+    let addr: SocketAddr = format!("{listen_address}:{port}")
+        .parse()
+        .map_err(|e| ProxyError::BindFailed(format!("无效的地址 {listen_address}:{port}: {e}")))?;
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
+        .map_err(|e| ProxyError::BindFailed(format!("创建 socket 失败: {e}")))?;
+    // 允许 TIME_WAIT / 重启重叠时重新绑定，避免 10048。
+    let _ = socket.set_reuse_address(true);
+    socket
+        .bind(&addr.into())
+        .map_err(|e| ProxyError::BindFailed(format!("bind {addr} 失败: {e}")))?;
+    // backlog 同 tokio 默认（1024）。
+    socket
+        .listen(1024)
+        .map_err(|e| ProxyError::BindFailed(format!("listen {addr} 失败: {e}")))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|e| ProxyError::BindFailed(format!("设置非阻塞失败: {e}")))?;
+    // socket2 0.6 开启 "all" feature 后有 `impl From<Socket> for std::net::TcpListener`，
+    // `.into()` 直接取回 std listener（该 From 不返回 Result）。
+    let std_listener: std::net::TcpListener = socket.into();
+    let local_addr = std_listener
+        .local_addr()
+        .map_err(|e| ProxyError::BindFailed(format!("读取 local_addr 失败: {e}")))?;
+    let tokio_listener =
+        TcpListener::from_std(std_listener).map_err(|e| ProxyError::BindFailed(e.to_string()))?;
+    Ok((tokio_listener, local_addr))
+}
 
 /// 代理服务器状态（共享）
 #[derive(Clone)]
@@ -122,25 +220,18 @@ impl ProxyServer {
             return Err(ProxyError::AlreadyRunning);
         }
 
-        let addr: SocketAddr =
-            format!("{}:{}", self.config.listen_address, self.config.listen_port)
-                .parse()
-                .map_err(|e| ProxyError::BindFailed(format!("无效的地址: {e}")))?;
-
         // 创建关闭通道
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         // 构建路由
         let app = self.build_router();
 
-        // 绑定监听器
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| ProxyError::BindFailed(e.to_string()))?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|e| ProxyError::BindFailed(e.to_string()))?;
-        let actual_port = local_addr.port();
+        // 绑定监听器：开启 SO_REUSEADDR，且配置端口被占用时自动回退到下一个空闲端口，
+        // 避免进程重叠 / TIME_WAIT 导致 bind 10048 → 「恢复代理接管状态」整条链失败 → 路由打不开。
+        let (listener, local_addr) = bind_listener_with_reuse_and_fallback(
+            &self.config.listen_address,
+            self.config.listen_port,
+        )?;
 
         log::info!(
             "[{}] 代理服务器启动于 {local_addr}（绑定档案: {}）",
@@ -151,7 +242,8 @@ impl ProxyServer {
             }
         );
 
-        *self.bound_port.write().await = Some(actual_port);
+        *self.bound_port.write().await = Some(local_addr.port());
+        let actual_port = local_addr.port();
 
         // 更新全局代理端口，用于系统代理检测
         crate::proxy::http_client::set_proxy_port(actual_port);

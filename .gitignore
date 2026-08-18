@@ -43,3 +43,4 @@ mainWindow.js
 .serena/
 .artifacts/
 .diff_*.txt
+build-tmp/

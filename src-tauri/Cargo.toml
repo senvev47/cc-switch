@@ -45,6 +45,11 @@ flate2 = "1"
 brotli = "7"
 zstd = "0.13"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+# socket2: 仅为在主端口 listener 上设置 SO_REUSEADDR，避免 app 重启/进程重叠
+# 时旧 socket 处于 TIME_WAIT 或尚未释放导致 bind 10048 (EADDRINUSE)，进而使
+# 「恢复代理接管状态」整条链失败、路由打不开。版本锁定与 Cargo.lock 既有传递
+# 依赖一致（socket2 0.6.x）。
+socket2 = { version = "0.6", features = ["all"] }
 futures = "0.3"
 async-stream = "0.3"
 bytes = "1.5"

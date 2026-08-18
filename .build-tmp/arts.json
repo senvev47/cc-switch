@@ -1,0 +1,25 @@
+{
+  "total_count": 1,
+  "artifacts": [
+    {
+      "id": 9315476083,
+      "node_id": "MDg6QXJ0aWZhY3Q5MzE1NDc2MDgz",
+      "name": "cc-switch-windows-x64-proxy-watchdog-gui",
+      "size_in_bytes": 26397693,
+      "url": "https://api.github.com/repos/senvev47/cc-switch/actions/artifacts/9315476083",
+      "archive_download_url": "https://api.github.com/repos/senvev47/cc-switch/actions/artifacts/9315476083/zip",
+      "expired": false,
+      "digest": "sha256:d87e3a05efc84591db789bcafd0341aec8fd606f444c79baa0f1d52c0caad1ff",
+      "created_at": "2026-08-18T07:42:33Z",
+      "updated_at": "2026-08-18T07:42:33Z",
+      "expires_at": "2026-11-16T07:24:37Z",
+      "workflow_run": {
+        "id": 32111294361,
+        "repository_id": 1290557615,
+        "head_repository_id": 1290557615,
+        "head_branch": "feat/profile-as-port",
+        "head_sha": "ac11ab4808a53d75f1376e1108c92fed708c527a"
+      }
+    }
+  ]
+}
