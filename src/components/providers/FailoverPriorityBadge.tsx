@@ -60,6 +60,29 @@ export function getFailoverProfileBorderColorClass(colorIndex: number): string {
 }
 
 /**
+ * 命名档案配色板的「卡片底色」变体：半透明渐变。
+ *
+ * 用于把整个供应商卡片染成其所属命名档案的颜色——与档案徽章同色，
+ * 视觉上一眼可见该 provider 归属哪个档案。当 provider 在某个命名档案中时，
+ * 卡片底色取该档案配色，优先级高于 active 的 emerald/blue 渐变。
+ */
+const PROFILE_BG_COLORS = [
+  "from-sky-500/10",
+  "from-violet-500/10",
+  "from-amber-500/10",
+  "from-rose-500/10",
+  "from-cyan-500/10",
+  "from-fuchsia-500/10",
+] as const;
+
+/** 取档案底色（与 `getFailoverProfileColorClass` 同索引，保证徽章、边框、底色三者同色）。 */
+export function getFailoverProfileBgColorClass(colorIndex: number): string {
+  const len = PROFILE_BG_COLORS.length;
+  const safe = ((Math.trunc(colorIndex) % len) + len) % len;
+  return PROFILE_BG_COLORS[safe];
+}
+
+/**
  * 故障转移优先级徽章
  * 显示供应商在故障转移队列（或某个命名档案）中的优先级顺序
  */

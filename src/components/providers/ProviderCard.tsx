@@ -19,7 +19,7 @@ import { PROVIDER_TYPES, TEMPLATE_TYPES } from "@/config/constants";
 import { isHermesReadOnlyProvider } from "@/config/hermesProviderPresets";
 import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
 import { HealthStatusIndicator } from "@/components/providers/HealthStatusIndicator";
-import { FailoverPriorityBadge, getFailoverProfileBorderColorClass } from "@/components/providers/FailoverPriorityBadge";
+import { FailoverPriorityBadge, getFailoverProfileBorderColorClass, getFailoverProfileBgColorClass } from "@/components/providers/FailoverPriorityBadge";
 import type { StreamCheckResult } from "@/lib/api/connectivity-check";
 import {
   extractCodexBaseUrl,
@@ -334,13 +334,24 @@ export function ProviderCard({
       !isProxyTakeover &&
       (isActiveProvider || hasPersistentConfigHighlight));
 
-  // 「档案即颜色」：当供应商在某个命名档案中，且当前不是 active（绿/蓝）时，
-  // 卡片边框染成该档案的配色（取首个档案，多档案时以主档案为准）。
-  // 优先级低于 active 高亮，避免视觉冲突。
-  const profileBorderClass =
-    !shouldUseGreen && !shouldUseBlue && (profileBadges?.length ?? 0) > 0
-      ? getFailoverProfileBorderColorClass(profileBadges![0].colorIndex)
-      : "";
+  // 「档案即颜色」：当供应商在某个命名档案中时，卡片边框 + 底色 染成该档案的配色
+  // （取首个档案，多档案时以主档案为准）。
+  //
+  // 优先级**高于** active 的 emerald/blue：用户要求「当新档案路由在使用时，供应商
+  // 卡片要出现该档案的颜色，如同使用供应商一样把整个卡片都变成对应的颜色」——
+  // 即使该 provider 正是当前 active 项（绿/蓝），只要它归属某个命名档案，就以档案
+  // 配色为准。这样「档案 test 的 P1 = My Claude copy」在被 test 终端使用时，卡片
+  // 染成 test 的颜色，而非默认的绿色，用户一眼可见当前走的是哪个档案。
+  const hasProfile = (profileBadges?.length ?? 0) > 0;
+  const profileBorderClass = hasProfile
+    ? getFailoverProfileBorderColorClass(profileBadges![0].colorIndex)
+    : "";
+  const profileBgClass = hasProfile
+    ? getFailoverProfileBgColorClass(profileBadges![0].colorIndex)
+    : "";
+  // 当档案配色生效时，压制 active 的绿/蓝边框与底色，避免颜色叠加冲突。
+  const effectiveGreen = shouldUseGreen && !hasProfile;
+  const effectiveBlue = shouldUseBlue && !hasProfile;
 
   return (
     <div
@@ -350,9 +361,9 @@ export function ProviderCard({
         isAutoFailoverEnabled || isProxyTakeover
           ? "hover:border-emerald-500/50"
           : "hover:border-border-active",
-        shouldUseGreen &&
+        effectiveGreen &&
           "border-emerald-500/60 shadow-sm shadow-emerald-500/10",
-        shouldUseBlue && "border-blue-500/60 shadow-sm shadow-blue-500/10",
+        effectiveBlue && "border-blue-500/60 shadow-sm shadow-blue-500/10",
         profileBorderClass,
         !(isActiveProvider || hasPersistentConfigHighlight) &&
           "hover:shadow-sm",
@@ -363,10 +374,11 @@ export function ProviderCard({
       <div
         className={cn(
           "absolute inset-0 bg-gradient-to-r to-transparent transition-opacity duration-500 pointer-events-none",
-          shouldUseGreen && "from-emerald-500/10",
-          shouldUseBlue && "from-blue-500/10",
-          !shouldUseGreen && !shouldUseBlue && "from-primary/10",
-          isActiveProvider || hasPersistentConfigHighlight
+          effectiveGreen && "from-emerald-500/10",
+          effectiveBlue && "from-blue-500/10",
+          hasProfile && profileBgClass,
+          !effectiveGreen && !effectiveBlue && !hasProfile && "from-primary/10",
+          isActiveProvider || hasPersistentConfigHighlight || hasProfile
             ? "opacity-100"
             : "opacity-0",
         )}

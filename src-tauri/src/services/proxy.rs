@@ -1616,7 +1616,7 @@ impl ProxyService {
         // 端口分配（复用已有映射或分配新端口）
         let port = match self.db.get_profile_port(app_type, profile_id) {
             Ok(Some(p)) => p,
-            Ok(None) => self.allocate_profile_port().await?,
+            Ok(None) => self.allocate_profile_port(app_type, profile_id).await?,
             Err(e) => return Err(format!("读取档案端口映射失败: {e}")),
         };
 
@@ -1670,8 +1670,19 @@ impl ProxyService {
         }
     }
 
-    /// 分配一个未占用的档案端口（15722 起递增）。
-    async fn allocate_profile_port(&self) -> Result<u16, String> {
+    /// 分配一个未占用的档案端口（15722 起递增），并**立即落库**持久化映射。
+    ///
+    /// 必须在分配成功当刻写入 `failover_profile_ports`：否则 app 重启后
+    /// `restore_profile_servers` 读 `all_profile_ports()` 拿不到该档案的端口，
+    /// 该档案的端口 server 不会被拉起；之前开出去的终端 baseUrl 指向死端口，
+    /// claude code gateway 探测失败后回退到共享 `gateway-models.json` 缓存——
+    /// 缓存里是**另一个档案**最后一次写入的 baseUrl 与模型列表，从而表现为
+    /// 「旧档案的模型列表串进了新档案终端」。
+    async fn allocate_profile_port(
+        &self,
+        app_type: &str,
+        profile_id: &str,
+    ) -> Result<u16, String> {
         const START: u16 = 15722;
         const END: u16 = 16000;
         for candidate in START..=END {
@@ -1684,9 +1695,17 @@ impl ProxyService {
             // 系统层占用检测（避免与主端口或其它进程冲突）
             let addr = format!("127.0.0.1:{candidate}");
             match tokio::net::TcpListener::bind(&addr).await {
-                Ok(_) => {
+                Ok(listener) => {
                     // 释放探测，留待 ProxyServer 真正 bind
-                    drop(addr);
+                    drop(listener);
+                    // 立即落库：保证 app 重启后 `restore_profile_servers` 能按
+                    // 同一端口拉起该档案 server，baseUrl 跨重启稳定。
+                    if let Err(e) = self.db.set_profile_port(app_type, profile_id, candidate) {
+                        return Err(format!("持久化档案端口映射失败: {e}"));
+                    }
+                    log::info!(
+                        "档案端口已分配并落库: {app_type}/{profile_id} → {candidate}"
+                    );
                     return Ok(candidate);
                 }
                 Err(_) => continue,
